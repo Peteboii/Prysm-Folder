@@ -1,0 +1,8 @@
+# Build output (the .exe is published on the Releases page instead)
+*.exe
+*.pdb
+*.tmp
+
+# Self-test leftovers
+*.error.txt
+promo-error.txt

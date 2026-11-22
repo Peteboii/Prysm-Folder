@@ -3746,6 +3746,7 @@ static class Promo
         Menus(Path.Combine(outDir, "menus.png"), fav);
         Icons(Path.Combine(outDir, "desktop-icons.png"), fav);
         IconGrid(Path.Combine(outDir, "icon-grid.png"), fav);
+        Social(Path.Combine(outDir, "social-preview.png"), fav, tools, work);
         Corners(Path.Combine(outDir, "corners.png"), fav);
         using (var icon = AppIcon(256))
         {
@@ -4000,6 +4001,68 @@ static class Promo
                     Caption(g, (light ? "Light" : "Dark") + ", " + (glass ? "see-through" : "solid"), new Rectangle(x - 60, 280, 310, 60), 11f, false, true);
                     x += 350;
                 }
+            wall.Save(outPng, ImageFormat.Png);
+        }
+    }
+
+    // GitHub's social preview (1280 x 640): what Discord and others show for the repo link.
+    // The app icon and name over the Prism wallpaper, the tagline, and the glass folder rising
+    // from the bottom edge with a few folder icons beside it.
+    static void Social(string outPng, string fav, string tools, string work)
+    {
+        Theme.Apply(false, true);
+        Theme.Sharp = false;
+        const int W = 1280, H = 640;
+        using (var wall = Wallpaper(W, H, false))
+        using (var g = Graphics.FromImage(wall))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+
+            // title row: icon + name, centred
+            using (var titleFont = new Font(Theme.UiFont(1f, FontStyle.Bold, true).FontFamily, 54f, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (var tagFont = new Font(Theme.UiFont(1f).FontFamily, 26f, FontStyle.Regular, GraphicsUnit.Pixel))
+            {
+                const string name = "Prysm Folder";
+                var ns = g.MeasureString(name, titleFont);
+                int icon = 76, gap = 22;
+                float rowW = icon + gap + ns.Width, x0 = (W - rowW) / 2f, y0 = 46;
+                using (var ic = AppIcon(256)) g.DrawImage(ic, x0, y0, icon, icon);
+                using (var sh = new SolidBrush(Color.FromArgb(120, 0, 0, 0))) g.DrawString(name, titleFont, sh, x0 + icon + gap + 2, y0 + (icon - ns.Height) / 2f + 3);
+                using (var b = new SolidBrush(Color.White)) g.DrawString(name, titleFont, b, x0 + icon + gap, y0 + (icon - ns.Height) / 2f);
+                using (var sf = new StringFormat { Alignment = StringAlignment.Center })
+                {
+                    var tr = new RectangleF(0, y0 + icon + 18, W, 40);
+                    using (var sh = new SolidBrush(Color.FromArgb(120, 0, 0, 0))) g.DrawString("Phone-style app folders for your Windows 11 desktop", tagFont, sh, new RectangleF(tr.X + 2, tr.Y + 2, tr.Width, tr.Height), sf);
+                    using (var b = new SolidBrush(Color.FromArgb(230, 255, 255, 255))) g.DrawString("Phone-style app folders for your Windows 11 desktop", tagFont, b, tr, sf);
+                }
+            }
+
+            // the glass folder, rising from the bottom edge (scaled from the 2x render)
+            var form = OpenOffscreen(fav);
+            using (var content = Capture(form))
+            {
+                float k = 0.78f;
+                int cw = (int)(content.Width * k), ch = (int)(content.Height * k);
+                var r = new Rectangle((W - cw) / 2 + 70, 220, cw, ch);
+                content.MakeTransparent(Theme.Key);   // before shrinking, so edges blend into the glass, not the key colour
+                using (var small = new Bitmap(cw, ch, PixelFormat.Format32bppArgb))
+                using (var clean = (Bitmap)wall.Clone())
+                {
+                    using (var sg = Graphics.FromImage(small)) { sg.InterpolationMode = InterpolationMode.HighQualityBicubic; sg.DrawImage(content, 0, 0, cw, ch); }
+                    Card(g, clean, r, Theme.Radius(24) * 2 * k, small);
+                }
+                // folder icons on the "desktop" to its left
+                int y = 250;
+                foreach (var f in new[] { fav, tools, work })
+                {
+                    using (var ico = FolderForm.RenderPreview(ItemsOf(f), 256)) g.DrawImage(ico, r.X - 170, y, 104, 104);
+                    Caption(g, Path.GetFileNameWithoutExtension(f), new Rectangle(r.X - 210, y + 108, 184, 36), 8.5f, false, true);
+                    y += 150;
+                }
+            }
+            form.Dispose();
             wall.Save(outPng, ImageFormat.Png);
         }
     }

@@ -3738,6 +3738,168 @@ static class Installer
     }
 }
 
+// An animated PNG (APNG) writer for the README demo: full colour (no palette, no dithering), so
+// glass and motion stay smooth, and browsers/GitHub play and loop it like a GIF. Frames are
+// streamed: each one stores only the rectangle that changed, with unchanged pixels transparent.
+class ApngWriter : IDisposable
+{
+    readonly Stream fs;
+    readonly int w, h, frameCount, delayNum, delayDen;
+    int seq, written;
+    int[] prev;
+    static uint[] crcTable;
+
+    public ApngWriter(string path, int width, int height, int frames, int delayNum, int delayDen)
+    {
+        w = width; h = height; frameCount = frames; this.delayNum = delayNum; this.delayDen = delayDen;
+        fs = File.Create(path);
+        fs.Write(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }, 0, 8);
+        var ihdr = new MemoryStream();
+        BE(ihdr, w); BE(ihdr, h);
+        ihdr.WriteByte(8); ihdr.WriteByte(6); ihdr.WriteByte(0); ihdr.WriteByte(0); ihdr.WriteByte(0);   // 8-bit RGBA
+        Chunk("IHDR", ihdr.ToArray());
+        var actl = new MemoryStream();
+        BE(actl, frameCount); BE(actl, 0);   // loop forever
+        Chunk("acTL", actl.ToArray());
+    }
+
+    // argb: one int per pixel (0xAARRGGBB), the whole canvas
+    public void AddFrame(int[] argb)
+    {
+        int x0 = 0, y0 = 0, x1 = w - 1, y1 = h - 1;
+        if (prev != null)
+        {
+            x0 = w; y0 = h; x1 = -1; y1 = -1;
+            for (int y = 0; y < h; y++)
+            {
+                int row = y * w;
+                for (int x = 0; x < w; x++)
+                    if (argb[row + x] != prev[row + x]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+            }
+            if (x1 < 0) { x0 = y0 = x1 = y1 = 0; }
+        }
+        int rw = x1 - x0 + 1, rh = y1 - y0 + 1;
+
+        // raw RGBA scanlines of the rectangle (unchanged pixels fully transparent), each row filtered
+        int stride = rw * 4;
+        var raw = new byte[rh * (stride + 1)];
+        var cur = new byte[stride];
+        var up = new byte[stride];
+        var best = new byte[stride];
+        var tryBuf = new byte[stride];
+        for (int y = 0; y < rh; y++)
+        {
+            for (int x = 0; x < rw; x++)
+            {
+                int i = (y0 + y) * w + x0 + x, c = argb[i];
+                bool same = prev != null && prev[i] == c;
+                int o = x * 4;
+                cur[o] = same ? (byte)0 : (byte)(c >> 16);
+                cur[o + 1] = same ? (byte)0 : (byte)(c >> 8);
+                cur[o + 2] = same ? (byte)0 : (byte)c;
+                cur[o + 3] = same ? (byte)0 : (byte)255;
+            }
+            int bestType = 0; long bestSum = long.MaxValue;
+            for (int ft = 0; ft < 5; ft++)
+            {
+                long sum = 0;
+                for (int i = 0; i < stride; i++)
+                {
+                    int a = i >= 4 ? cur[i - 4] : 0, b = y > 0 ? up[i] : 0, cc = (i >= 4 && y > 0) ? up[i - 4] : 0, v;
+                    switch (ft)
+                    {
+                        case 0: v = cur[i]; break;
+                        case 1: v = cur[i] - a; break;
+                        case 2: v = cur[i] - b; break;
+                        case 3: v = cur[i] - ((a + b) >> 1); break;
+                        default: v = cur[i] - Paeth(a, b, cc); break;
+                    }
+                    tryBuf[i] = (byte)v;
+                    int sv = (sbyte)(byte)v;
+                    sum += sv < 0 ? -sv : sv;
+                }
+                if (sum < bestSum) { bestSum = sum; bestType = ft; Buffer.BlockCopy(tryBuf, 0, best, 0, stride); }
+            }
+            raw[y * (stride + 1)] = (byte)bestType;
+            Buffer.BlockCopy(best, 0, raw, y * (stride + 1) + 1, stride);
+            Buffer.BlockCopy(cur, 0, up, 0, stride);
+        }
+        byte[] z = Zlib(raw);
+
+        var fctl = new MemoryStream();
+        BE(fctl, seq++); BE(fctl, rw); BE(fctl, rh); BE(fctl, x0); BE(fctl, y0);
+        BE16(fctl, delayNum); BE16(fctl, delayDen);
+        fctl.WriteByte(0);                        // dispose: leave it
+        fctl.WriteByte((byte)(prev == null ? 0 : 1));   // blend: first frame replaces, the rest draw over
+        Chunk("fcTL", fctl.ToArray());
+        if (written == 0) Chunk("IDAT", z);
+        else
+        {
+            var fd = new MemoryStream();
+            BE(fd, seq++);
+            fd.Write(z, 0, z.Length);
+            Chunk("fdAT", fd.ToArray());
+        }
+        written++;
+        prev = argb;
+    }
+
+    public void Dispose()
+    {
+        Chunk("IEND", new byte[0]);
+        fs.Dispose();
+    }
+
+    static int Paeth(int a, int b, int c)
+    {
+        int p = a + b - c, pa = Math.Abs(p - a), pb = Math.Abs(p - b), pc = Math.Abs(p - c);
+        return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+    }
+
+    static byte[] Zlib(byte[] data)
+    {
+        var ms = new MemoryStream();
+        ms.WriteByte(0x78); ms.WriteByte(0xDA);
+        using (var ds = new System.IO.Compression.DeflateStream(ms, System.IO.Compression.CompressionLevel.Optimal, true))
+            ds.Write(data, 0, data.Length);
+        uint a = 1, b = 0;
+        foreach (byte x in data) { a = (a + x) % 65521; b = (b + a) % 65521; }
+        uint adler = (b << 16) | a;
+        ms.WriteByte((byte)(adler >> 24)); ms.WriteByte((byte)(adler >> 16)); ms.WriteByte((byte)(adler >> 8)); ms.WriteByte((byte)adler);
+        return ms.ToArray();
+    }
+
+    void Chunk(string type, byte[] data)
+    {
+        var t = Encoding.ASCII.GetBytes(type);
+        var len = new byte[] { (byte)(data.Length >> 24), (byte)(data.Length >> 16), (byte)(data.Length >> 8), (byte)data.Length };
+        fs.Write(len, 0, 4);
+        fs.Write(t, 0, 4);
+        fs.Write(data, 0, data.Length);
+        uint crc = Crc(Crc(0xFFFFFFFF, t), data) ^ 0xFFFFFFFF;
+        fs.Write(new byte[] { (byte)(crc >> 24), (byte)(crc >> 16), (byte)(crc >> 8), (byte)crc }, 0, 4);
+    }
+
+    static uint Crc(uint crc, byte[] buf)
+    {
+        if (crcTable == null)
+        {
+            crcTable = new uint[256];
+            for (uint n = 0; n < 256; n++)
+            {
+                uint c = n;
+                for (int k = 0; k < 8; k++) c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1;
+                crcTable[n] = c;
+            }
+        }
+        foreach (byte x in buf) crc = crcTable[(crc ^ x) & 0xFF] ^ (crc >> 8);
+        return crc;
+    }
+
+    static void BE(Stream s, int v) { s.WriteByte((byte)(v >> 24)); s.WriteByte((byte)(v >> 16)); s.WriteByte((byte)(v >> 8)); s.WriteByte((byte)v); }
+    static void BE16(Stream s, int v) { s.WriteByte((byte)(v >> 8)); s.WriteByte((byte)v); }
+}
+
 // A small animated-GIF writer for the README demo. One 256-colour palette for the whole
 // animation (median cut over samples of every frame), a light ordered dither (stable from frame
 // to frame, so gradients don't shimmer), and each frame stores only the rectangle that changed,
@@ -4227,7 +4389,9 @@ static class Promo
         Directory.CreateDirectory(tmp);
         FolderForm.S = 1.25f; Theme.FontScale = 1.25f; Native.Jumbo = true; Theme.Grid3 = true; Theme.Sharp = false;
         Decor.Disabled = true;
-        const int W = 1000, H = 600, FPS = 20;
+        bool apng = outGif.EndsWith(".png", StringComparison.OrdinalIgnoreCase);   // .png: animated PNG at 60 fps
+        const int W = 1000, H = 600;
+        int FPS = apng ? 60 : 20;
         const float T = 8.2f;
 
         string fav = MakeFolder("Favourites", new[] {
@@ -4334,6 +4498,7 @@ static class Promo
 
         var frames = new List<int[]>();
         int n = (int)(T * FPS);
+        ApngWriter png = apng ? new ApngWriter(outGif, W, H, n, 1, FPS) : null;
         for (int fi = 0; fi < n; fi++)
         {
             float t = fi / (float)FPS;
@@ -4408,10 +4573,12 @@ static class Promo
                     }
 
                 DrawCursor(g, cur);
-                frames.Add(GifWriter.ReadPixels(frame));
+                if (png != null) png.AddFrame(GifWriter.ReadPixels(frame));
+                else frames.Add(GifWriter.ReadPixels(frame));
             }
         }
-        GifWriter.Write(outGif, frames, W, H, 100 / FPS);
+        if (png != null) png.Dispose();
+        else GifWriter.Write(outGif, frames, W, H, 100 / FPS);
     }
 
     static Rectangle Off(Rectangle r, Point by) { r.Offset(by); return r; }
@@ -4427,8 +4594,13 @@ static class Promo
     // draws a layer scaled around the card's centre, faded
     static void DrawLayer(Graphics g, Bitmap lay, Rectangle card, float scale, float alpha, bool clip = false)
     {
+        // settled: draw it exactly, so the end of an animation doesn't "snap" from resampled to crisp
+        if (Math.Abs(scale - 1) < 0.0015f) scale = 1;
         float cx = card.X + card.Width / 2f, cy = card.Y + card.Height / 2f;
         var state = g.Save();
+        // sub-pixel placement while scaling (no rounding to whole pixels, which made it wobble)
+        g.InterpolationMode = scale == 1 ? InterpolationMode.NearestNeighbor : InterpolationMode.HighQualityBilinear;
+        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
         g.TranslateTransform(cx, cy);
         g.ScaleTransform(scale, scale);
         g.TranslateTransform(-cx, -cy);

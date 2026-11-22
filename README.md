@@ -19,7 +19,7 @@ in a glassy Windows 11 style.
 ## See it in action
 
 <div align="center">
-<img src="docs/images/demo.gif" alt="Animated demo: pointing at a folder on the desktop makes it spring open; hovering highlights apps; right-clicking an app opens a menu; the settings card switches the folder from See-through to Solid; clicking the desktop closes it" width="100%">
+<img src="docs/images/demo.png" alt="Animated demo: pointing at a folder on the desktop makes it spring open; hovering highlights apps; right-clicking an app opens a menu; the settings card switches the folder from See-through to Solid; clicking the desktop closes it" width="100%">
 </div>
 
 ## Why?

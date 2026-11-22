@@ -5195,6 +5195,19 @@ static class Program
             }
             return;
         }
+        if (arg == "--update-now")
+        {
+            // Command line: update now if GitHub has a newer version (what the settings button does)
+            try
+            {
+                var r = Updater.FetchLatest();
+                Updater.Remember(r);
+                if (r.Version > Updater.Current) Updater.Install(Updater.Download(r.ExeUrl, null));
+                else HoverWatcher.Log("update-now: already up to date (" + Updater.CurrentText + ")");
+            }
+            catch (Exception ex) { HoverWatcher.Log("update-now failed: " + ex.Message); }
+            return;
+        }
         if (arg == "--updatetest" && args.Length > 1)
         {
             // Self-test: reach GitHub, read the latest release, download (but don't install) its exe

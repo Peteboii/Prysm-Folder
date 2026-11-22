@@ -272,6 +272,8 @@ static class Settings
     public static bool Glass { get { return Get("Glass", 1) != 0; } set { Set("Glass", value ? 1 : 0); } }
     // Desktop icon: 3x3 mini-grid once a folder has more than 4 apps (true), or always 2x2 (false)
     public static bool IconGrid3 { get { return Get("IconGrid3", 1) != 0; } set { Set("IconGrid3", value ? 1 : 0); } }
+    // Corners: big and round like Prism (false), or tighter (true). Both looks, and the Desktop icon.
+    public static bool SharpCorners { get { return Get("SharpCorners", 0) != 0; } set { Set("SharpCorners", value ? 1 : 0); } }
 }
 
 // Prism's look (same palette as DG-Dock's launchpad): a #202022 panel, white "ink" tints and
@@ -284,7 +286,9 @@ static class Theme
 
     // See-through look: the window's background is this colour made fully transparent, with a
     // blurred (acrylic) window behind it. Odd values so real icon pixels practically never match.
-    public static Color Key { get { return Light ? Color.FromArgb(0xee, 0xed, 0xf1) : Color.FromArgb(0x1f, 0x1e, 0x21); } }
+    // (On the Solid look the key is the panel colour itself: the card layer behind is that same
+    // colour, so it looks identical, while letting both looks share the same smooth corners.)
+    public static Color Key { get { return !Glass ? Panel : Light ? Color.FromArgb(0xee, 0xed, 0xf1) : Color.FromArgb(0x1f, 0x1e, 0x21); } }
     // What every control paints its background with.
     public static Color Bg { get { return Glass ? Key : Panel; } }
     // Acrylic tint, as AABBGGRR: the Prism panel colour at ~60% over the blur.
@@ -302,10 +306,15 @@ static class Theme
         }
         catch { light = false; }
         Grid3 = Settings.IconGrid3;
+        Sharp = Settings.SharpCorners;
         Apply(light, Settings.Glass);
     }
 
     public static bool Grid3 = true;   // the Desktop icon's mini-grid can go 3x3 (see Settings.IconGrid3)
+    public static bool Sharp;          // tighter corners (see Settings.SharpCorners)
+
+    // A corner radius (in Prism's "rounded" size), made tighter when Sharper corners is on.
+    public static float Radius(float rounded) { return Sharp ? Math.Max(4f, rounded / 3f) : rounded; }
 
     public static void Apply(bool light, bool glass)
     {
@@ -355,7 +364,7 @@ static class Theme
     public static int ToBgr(Color c) { return c.R | (c.G << 8) | (c.B << 16); }
 
     // The look a Desktop icon is drawn in; when it changes, the icons are redrawn.
-    public static string LookSig { get { return (Light ? "light" : "dark") + "-" + (Glass ? "glass" : "solid") + "-g" + (Grid3 ? "3" : "2") + "-2"; } }
+    public static string LookSig { get { return (Light ? "light" : "dark") + "-" + (Glass ? "glass" : "solid") + "-g" + (Grid3 ? "3" : "2") + "-c" + (Sharp ? "s" : "r") + "-2"; } }
 
     // Windows 11's icon font (Segoe Fluent Icons), or Segoe MDL2 Assets on older systems
     public static Font IconFont(float size)
@@ -456,12 +465,12 @@ class Tile : Control
         if (Lifted)
         {
             // picked up: a Prism-blue outline around the whole tile
-            using (var p = FolderForm.Rounded(new RectangleF(2 * s, 2 * s, Width - 4 * s, Height - 4 * s), 16 * s))
+            using (var p = FolderForm.Rounded(new RectangleF(2 * s, 2 * s, Width - 4 * s, Height - 4 * s), Theme.Radius(16) * s))
             using (var pen = new Pen(Theme.Accent, 2f * s)) g.DrawPath(pen, p);
         }
         else if (Hover || DropTarget)
         {
-            using (var p = FolderForm.Rounded(new RectangleF(2 * s, 2 * s, Width - 4 * s, Height - 4 * s), 16 * s))
+            using (var p = FolderForm.Rounded(new RectangleF(2 * s, 2 * s, Width - 4 * s, Height - 4 * s), Theme.Radius(16) * s))
             {
                 if (Theme.Glass)
                     using (var pen = new Pen(Theme.Ink18, 1.2f * s)) g.DrawPath(pen, p);   // glass: a soft outline
@@ -553,7 +562,7 @@ class FolderForm : Form, IGlassHost
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
         BackColor = Theme.Bg;
-        if (Theme.Glass) TransparencyKey = Theme.Key;   // background becomes see-through to the blur window behind
+        TransparencyKey = Theme.Key;   // background shows the card layer behind (glass, or the solid panel)
         ForeColor = Theme.Fg;
         Font = Theme.UiFont(9f);
         KeyPreview = true;
@@ -612,7 +621,7 @@ class FolderForm : Form, IGlassHost
         if (OpenAt.HasValue) Location = OpenAt.Value;
         Opacity = 0;   // fades in once shown (see AnimateIn)
         base.OnLoad(e);
-        if (Theme.Glass)
+        // the card layer behind: glass on See-through, the panel on Solid (smooth corners either way)
         {
             backdrop = new GlassBackdrop(this, 24);
             backdrop.Show();
@@ -1194,6 +1203,19 @@ class FolderForm : Form, IGlassHost
     {
         if (glass == Theme.Glass) return;
         Settings.Glass = glass;
+        Reopen();
+    }
+
+    // Corners: Rounded or Sharper (the folder, its menus and cards, and the Desktop icons)
+    public void SetCorners(bool sharp)
+    {
+        if (sharp == Theme.Sharp) return;
+        Settings.SharpCorners = sharp;
+        Reopen();
+    }
+
+    void Reopen()
+    {
         string target = filePath != null ? "\"" + filePath + "\"" : "\"" + id + "\"";
         // the new window also redraws the Desktop icons in the new look
         try { Process.Start(Application.ExecutablePath, target + " --at " + Left + "," + Top + " --refresh-icons"); } catch { }
@@ -1433,7 +1455,7 @@ class FolderForm : Form, IGlassHost
             float line = Math.Max(1f, size / 96f);
             // The frame matches the folder's look: See-through is a translucent Prism glass tile
             // (the wallpaper shows through), Solid is the Prism panel; light or dark with Windows.
-            using (var p = Rounded(box, size * 0.22f))
+            using (var p = Rounded(box, size * (Theme.Sharp ? 0.10f : 0.22f)))
             {
                 Color panel = Theme.Light ? Color.FromArgb(0xf3, 0xf3, 0xf5) : Theme.Glass ? Color.FromArgb(0x14, 0x14, 0x16) : Color.FromArgb(0x20, 0x20, 0x22);
                 int body = Theme.Glass ? (Theme.Light ? 150 : 135) : 250;
@@ -1448,7 +1470,7 @@ class FolderForm : Form, IGlassHost
                                         : (Theme.Glass ? Color.FromArgb(70, 255, 255, 255) : Color.FromArgb(38, 255, 255, 255));
                 using (var pen = new Pen(rim, line)) g.DrawPath(pen, p);
                 if (Theme.Glass && Theme.Light)   // a faint outer edge so a light glass tile still shows on a light wallpaper
-                    using (var pen = new Pen(Color.FromArgb(28, 0, 0, 0), line)) g.DrawPath(pen, Rounded(RectangleF.Inflate(box, line, line), size * 0.22f + line));
+                    using (var pen = new Pen(Color.FromArgb(28, 0, 0, 0), line)) g.DrawPath(pen, Rounded(RectangleF.Inflate(box, line, line), size * (Theme.Sharp ? 0.10f : 0.22f) + line));
             }
             Color slot = Theme.Light ? Color.FromArgb(22, 0, 0, 0) : Color.FromArgb(30, 255, 255, 255);
             int n = Theme.Grid3 && list.Count > 4 ? 3 : 2;   // 2x2, or 3x3 for bigger folders if that's the setting
@@ -1589,7 +1611,7 @@ class FolderForm : Form, IGlassHost
         get
         {
             var cp = base.CreateParams;
-            if (!Theme.Glass) cp.ClassStyle |= 0x20000;   // drop shadow (on glass the blur window has it)
+            // (no drop shadow: the card layer behind draws the shape)
             return cp;
         }
     }
@@ -1857,8 +1879,8 @@ class SettingsCard : Form, IGlassHost, IFolderChild
     readonly FolderForm folder;
     readonly Action<bool> setLook;
     GlassBackdrop glass;
-    Rectangle hoverRow, toggleRect, segGlass, segSolid, seg2, seg3;
-    int hot = -1;   // 0 hover row, 1 See-through, 2 Solid, 3 icon 2x2, 4 icon 3x3
+    Rectangle hoverRow, toggleRect, segGlass, segSolid, seg2, seg3, segRound, segSharp;
+    int hot = -1;   // 0 hover row, 1 See-through, 2 Solid, 3 icon 2x2, 4 icon 3x3, 5 Rounded, 6 Sharper
     readonly Font titleFont = Theme.UiFont(11f, FontStyle.Regular, true);
     readonly Font font = Theme.UiFont(9.5f);
     readonly Font small = Theme.UiFont(8.5f);
@@ -1874,9 +1896,9 @@ class SettingsCard : Form, IGlassHost, IFolderChild
         TopMost = true;
         KeyPreview = true;
         BackColor = Theme.Bg;
-        if (Theme.Glass) TransparencyKey = Theme.Key;
+        TransparencyKey = Theme.Key;
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
-        ClientSize = new Size(Px(292), Px(262));
+        ClientSize = new Size(Px(292), Px(342));
         int pad = Px(14);
         hoverRow = new Rectangle(pad - Px(6), Px(46), ClientSize.Width - 2 * pad + Px(12), Px(48));
         toggleRect = new Rectangle(ClientSize.Width - pad - Px(40), hoverRow.Y + (hoverRow.Height - Px(20)) / 2, Px(40), Px(20));
@@ -1886,6 +1908,9 @@ class SettingsCard : Form, IGlassHost, IFolderChild
         int gridY = Px(210);
         seg2 = new Rectangle(pad, gridY, half, segH);
         seg3 = new Rectangle(pad + half, gridY, ClientSize.Width - 2 * pad - half, segH);
+        int cornerY = Px(290);
+        segRound = new Rectangle(pad, cornerY, half, segH);
+        segSharp = new Rectangle(pad + half, cornerY, ClientSize.Width - 2 * pad - half, segH);
         Cursor = Cursors.Hand;
     }
 
@@ -1893,7 +1918,7 @@ class SettingsCard : Form, IGlassHost, IFolderChild
     {
         Opacity = 0;
         base.OnLoad(e);
-        if (Theme.Glass)
+        // the card layer behind: glass on See-through, the panel on Solid (smooth corners either way)
         {
             glass = new GlassBackdrop(this, 16);
             glass.Show();
@@ -1915,7 +1940,7 @@ class SettingsCard : Form, IGlassHost, IFolderChild
 
     protected override CreateParams CreateParams
     {
-        get { var cp = base.CreateParams; cp.ExStyle |= 0x80; if (!Theme.Glass) cp.ClassStyle |= 0x20000; return cp; }
+        get { var cp = base.CreateParams; cp.ExStyle |= 0x80; return cp; }
     }
 
     // pops in like the folder: glass springs, content fades
@@ -1969,7 +1994,8 @@ class SettingsCard : Form, IGlassHost, IFolderChild
     int HitTest(Point p)
     {
         return hoverRow.Contains(p) ? 0 : segGlass.Contains(p) ? 1 : segSolid.Contains(p) ? 2
-             : seg2.Contains(p) ? 3 : seg3.Contains(p) ? 4 : -1;
+             : seg2.Contains(p) ? 3 : seg3.Contains(p) ? 4
+             : segRound.Contains(p) ? 5 : segSharp.Contains(p) ? 6 : -1;
     }
 
     protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); SetHot(HitTest(e.Location)); }
@@ -1998,6 +2024,8 @@ class SettingsCard : Form, IGlassHost, IFolderChild
                 Update();
                 FolderForm.RefreshAllIcons();   // redraw every folder's Desktop icon with the new grid
                 break;
+            case 5: if (Theme.Sharp) { Close(); folder.SetCorners(false); } break;
+            case 6: if (!Theme.Sharp) { Close(); folder.SetCorners(true); } break;
         }
     }
 
@@ -2043,6 +2071,17 @@ class SettingsCard : Form, IGlassHost, IFolderChild
         }
         DrawSegment(g, seg2, "2 × 2", !Theme.Grid3, hot == 3);
         DrawSegment(g, seg3, "3 × 3", Theme.Grid3, hot == 4);
+
+        // Corners:  [ Rounded | Sharper ]
+        FolderForm.DrawLabel(g, "Corners", small, new Rectangle(pad, Px(264), Width - 2 * pad, Px(20)), Theme.Dim, false);
+        var track3 = Rectangle.Union(segRound, segSharp);
+        using (var p = FolderForm.Rounded(track3, track3.Height / 2f))
+        {
+            if (Theme.Glass) using (var pen = new Pen(Theme.Ink18, 1.2f * FolderForm.S)) g.DrawPath(pen, p);
+            else using (var b = new SolidBrush(Theme.Ink08)) g.FillPath(b, p);
+        }
+        DrawSegment(g, segRound, "Rounded", !Theme.Sharp, hot == 5);
+        DrawSegment(g, segSharp, "Sharper", Theme.Sharp, hot == 6);
     }
 
     void FillOrOutline(Graphics g, Rectangle r, float rad, Color c)
@@ -2113,13 +2152,13 @@ abstract class PrismPopup : Form, IGlassHost, IFolderChild
         BackColor = Theme.Bg;
         ForeColor = Theme.Fg;
         Font = Theme.UiFont(9.5f);
-        if (Theme.Glass) TransparencyKey = Theme.Key;
+        TransparencyKey = Theme.Key;
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
     }
 
     protected override CreateParams CreateParams
     {
-        get { var cp = base.CreateParams; cp.ExStyle |= 0x80; if (!Theme.Glass) cp.ClassStyle |= 0x20000; return cp; }
+        get { var cp = base.CreateParams; cp.ExStyle |= 0x80; return cp; }
     }
 
     // keep it on screen
@@ -2135,7 +2174,7 @@ abstract class PrismPopup : Form, IGlassHost, IFolderChild
     {
         Opacity = 0;
         base.OnLoad(e);
-        if (Theme.Glass)
+        // the card layer behind: glass on See-through, the panel on Solid (smooth corners either way)
         {
             glass = new GlassBackdrop(this, radius);
             glass.Show();
@@ -2297,7 +2336,7 @@ class PrismMenu : PrismPopup
                 using (var pen = new Pen(Theme.Ink18, 1f)) g.DrawLine(pen, en.Bounds.X + Px(10), y, en.Bounds.Right - Px(10), y);
                 continue;
             }
-            if (i == hot) Highlight(g, en.Bounds, Px(8));
+            if (i == hot) Highlight(g, en.Bounds, Px(Theme.Radius(8)));
             Color c = en.Danger ? Color.FromArgb(0xff, 0x6b, 0x6b) : (i == hot ? Theme.Fg : Theme.Fg2);
             var gr = new Rectangle(en.Bounds.X + Px(8), en.Bounds.Y, Px(24), en.Bounds.Height);
             var old = g.TextRenderingHint;
@@ -2536,7 +2575,7 @@ class GlassBackdrop : Form
     {
         Host = host;
         glassHost = host as IGlassHost;
-        this.radius = radius;
+        this.radius = Theme.Radius(radius);   // Rounded or Sharper (settings)
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
         ShowInTaskbar = false;
@@ -2672,11 +2711,21 @@ class GlassBackdrop : Form
             root = c.CreateContainerVisual();
             target.Root = root;
 
+            if (!Theme.Glass)
+            {
+                // Solid look: the opaque Prism panel and its hairline rim. Drawn here too (rather
+                // than relying on Windows' fixed 8px window corners) so both looks get the same
+                // smooth corners, Rounded or Sharper.
+                AddFill(c.CreateColorBrush(C(Theme.Panel, 1)));
+                AddRim(c, Theme.Light ? C(Color.Black, .12) : C(Color.White, .13), 0.5f);
+                LayoutGlass();
+                return true;
+            }
             // 1. the blurred backdrop
-            AddFill(c.CreateHostBackdropBrush(), 0);
+            AddFill(c.CreateHostBackdropBrush());
             // 2. Prism's panel tint (Liquid Glass: the panel thinned right down over the blur)
             Color panel = Theme.Light ? Color.FromArgb(0xf3, 0xf3, 0xf5) : Color.FromArgb(0x14, 0x14, 0x16);
-            AddFill(c.CreateColorBrush(C(panel, Theme.Light ? 0.45 : 0.34)), 0);
+            AddFill(c.CreateColorBrush(C(panel, Theme.Light ? 0.45 : 0.34)));
             // 3. the sheen: a breath of white, brighter at the top (Prism's linear-gradient)
             var sheen = c.CreateLinearGradientBrush();
             sheen.MappingMode = Windows.UI.Composition.CompositionMappingMode.Relative;
@@ -2686,7 +2735,7 @@ class GlassBackdrop : Form
             sheen.ColorStops.Add(c.CreateColorGradientStop(0f, C(Color.White, a0)));
             sheen.ColorStops.Add(c.CreateColorGradientStop(.6f, C(Color.White, a1)));
             sheen.ColorStops.Add(c.CreateColorGradientStop(1f, C(Color.White, a2)));
-            AddFill(sheen, 0);
+            AddFill(sheen);
             // 4. the rim: one clean hairline all round (Prism's inset 1px rim)
             AddRim(c, C(Color.White, Theme.Light ? .60 : .15), 0.5f);
             LayoutGlass();
@@ -2695,14 +2744,28 @@ class GlassBackdrop : Form
         catch { return false; }
     }
 
-    void AddFill(Windows.UI.Composition.CompositionBrush brush, float inset)
+    // A layer filling the card's rounded shape. Clipped with a RectangleClip, which draws its
+    // rounded corners smoothly (anti-aliased); the older geometric clip leaves stair-stepped
+    // corners. Falls back to that one only where RectangleClip isn't available.
+    readonly List<Windows.UI.Composition.RectangleClip> clips = new List<Windows.UI.Composition.RectangleClip>();
+
+    void AddFill(Windows.UI.Composition.CompositionBrush brush)
     {
         var c = compositor;
         var sprite = c.CreateSpriteVisual();
         sprite.Brush = brush;
-        var g = c.CreateRoundedRectangleGeometry();
-        geoms.Add(g);
-        sprite.Clip = c.CreateGeometricClip(g);
+        try
+        {
+            var clip = c.CreateRectangleClip();
+            clips.Add(clip);
+            sprite.Clip = clip;
+        }
+        catch
+        {
+            var g = c.CreateRoundedRectangleGeometry();
+            geoms.Add(g);
+            sprite.Clip = c.CreateGeometricClip(g);
+        }
         root.Children.InsertAtTop(sprite);
         sized.Add(sprite);
     }
@@ -2730,6 +2793,12 @@ class GlassBackdrop : Form
         var size = new System.Numerics.Vector2(w, h);
         root.Size = size;
         foreach (var v in sized) v.Size = size;
+        var rr = new System.Numerics.Vector2(r, r);
+        foreach (var cl in clips)
+        {
+            cl.Left = 0; cl.Top = 0; cl.Right = w; cl.Bottom = h;
+            cl.TopLeftRadius = rr; cl.TopRightRadius = rr; cl.BottomRightRadius = rr; cl.BottomLeftRadius = rr;
+        }
         foreach (var g in geoms)
         {
             float inset;
@@ -2755,6 +2824,7 @@ class GlassBackdrop : Form
 
     void UseAcrylic()
     {
+        if (!Theme.Glass) { BackColor = Theme.Panel; return; }   // Solid look without composition: just the panel
         // ACCENT_ENABLE_ACRYLICBLURBEHIND with the Prism panel colour as the tint
         var accent = new AccentPolicy { State = 4, Flags = 2, Gradient = Theme.GlassTint };
         int size = Marshal.SizeOf(accent);
@@ -3364,7 +3434,7 @@ static class Promo
         Directory.CreateDirectory(outDir);
         tmp = Path.Combine(Path.GetTempPath(), "PrysmPromo");
         Directory.CreateDirectory(tmp);
-        FolderForm.S = 2f; Theme.FontScale = 2f; Native.Jumbo = true; Theme.Grid3 = true;
+        FolderForm.S = 2f; Theme.FontScale = 2f; Native.Jumbo = true; Theme.Grid3 = true; Theme.Sharp = false;
 
         string fav = MakeFolder("Favourites", new[] {
             @"C:\Windows\explorer.exe|File Explorer",
@@ -3387,6 +3457,7 @@ static class Promo
         Menus(Path.Combine(outDir, "menus.png"), fav);
         Icons(Path.Combine(outDir, "desktop-icons.png"), fav);
         IconGrid(Path.Combine(outDir, "icon-grid.png"), fav);
+        Corners(Path.Combine(outDir, "corners.png"), fav);
         using (var icon = AppIcon(256))
         {
             icon.Save(Path.Combine(outDir, "icon.png"), ImageFormat.Png);
@@ -3556,7 +3627,7 @@ static class Promo
             using (var content = Capture(form))
             {
                 var r = new Rectangle(330, 110, content.Width, content.Height);
-                using (var clean = (Bitmap)wall.Clone()) Card(g, clean, r, 48, content);
+                using (var clean = (Bitmap)wall.Clone()) Card(g, clean, r, Theme.Radius(24) * 2, content);
             }
             form.Dispose();
             wall.Save(outPng, ImageFormat.Png);
@@ -3576,7 +3647,7 @@ static class Promo
                 using (var content = Capture(form))
                 {
                     var r = new Rectangle(x, 150, content.Width, content.Height);
-                    using (var clean = (Bitmap)wall.Clone()) Card(g, clean, r, glass ? 48 : 16, content);
+                    using (var clean = (Bitmap)wall.Clone()) Card(g, clean, r, Theme.Radius(24) * 2, content);
                     Caption(g, glass ? "See-through" : "Solid", new Rectangle(x, 60, content.Width, 60), 17f, true, !light,
                             light ? Color.FromArgb(0x17, 0x17, 0x1b) : Color.White);
                     x += content.Width + 120;
@@ -3596,7 +3667,7 @@ static class Promo
             var form = OpenOffscreen(fav);
             var fr = new Rectangle(90, 110, form.Width, form.Height);
             using (var content = Capture(form))
-            using (var clean = (Bitmap)wall.Clone()) Card(g, clean, fr, 48, content);
+            using (var clean = (Bitmap)wall.Clone()) Card(g, clean, fr, Theme.Radius(24) * 2, content);
 
             // right-click on an app
             using (var m = new PrismMenu(form))
@@ -3613,13 +3684,13 @@ static class Promo
                 m.Measure();
                 using (var mc = Capture(m))
                 using (var clean = (Bitmap)wall.Clone())
-                    Card(g, clean, new Rectangle(fr.X + 330, fr.Y + 300, mc.Width, mc.Height), 24, mc);
+                    Card(g, clean, new Rectangle(fr.X + 330, fr.Y + 300, mc.Width, mc.Height), Theme.Radius(12) * 2, mc);
             }
             // the settings card under the gear
             using (var card = new SettingsCard(form, x => { }))
             using (var cc = Capture(card))
             using (var clean = (Bitmap)wall.Clone())
-                Card(g, clean, new Rectangle(fr.Right + 80, fr.Y + 40, cc.Width, cc.Height), 32, cc);
+                Card(g, clean, new Rectangle(fr.Right + 80, fr.Y + 40, cc.Width, cc.Height), Theme.Radius(16) * 2, cc);
             form.Dispose();
             wall.Save(outPng, ImageFormat.Png);
         }
@@ -3640,6 +3711,34 @@ static class Promo
                     Caption(g, (light ? "Light" : "Dark") + ", " + (glass ? "see-through" : "solid"), new Rectangle(x - 60, 280, 310, 60), 11f, false, true);
                     x += 350;
                 }
+            wall.Save(outPng, ImageFormat.Png);
+        }
+    }
+
+    // The same folder with Rounded and with Sharper corners (window and Desktop icon)
+    static void Corners(string outPng, string fav)
+    {
+        var items = ItemsOf(fav);
+        using (var wall = Wallpaper(1900, 860, false))
+        using (var g = Graphics.FromImage(wall))
+        {
+            int x = 70;
+            foreach (bool sharp in new[] { false, true })
+            {
+                Theme.Sharp = sharp;
+                Theme.Apply(false, true);
+                var form = OpenOffscreen(fav);
+                using (var content = Capture(form))
+                {
+                    var r = new Rectangle(x, 150, content.Width, content.Height);
+                    using (var clean = (Bitmap)wall.Clone()) Card(g, clean, r, Theme.Radius(24) * 2, content);
+                    Caption(g, sharp ? "Sharper" : "Rounded", new Rectangle(x, 60, content.Width, 60), 17f, true, true);
+                    using (var icon = FolderForm.RenderPreview(items, 256)) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.DrawImage(icon, x + content.Width - 150, r.Bottom + 20, 112, 112); }
+                    x += content.Width + 120;
+                }
+                form.Dispose();
+            }
+            Theme.Sharp = false;
             wall.Save(outPng, ImageFormat.Png);
         }
     }

@@ -35,6 +35,7 @@ you click something else.
   bigger folders (your choice in settings).
 - **Two looks, light or dark.** **See-through** blurred glass, or a **Solid** panel. Both follow Windows'
   light/dark mode, and the desktop icon matches.
+- **Rounded or sharper corners.** Big, smooth Prism-style corners, or tighter ones, for both looks.
 - **Phone-style reordering.** Drag an app and the others slide out of the way.
 - **Follows your files.** Moved or renamed a folder or file that's in a Prysm Folder? It still opens.
 - **Closes the instant you click away**, with a quick fade.
@@ -46,6 +47,9 @@ you click something else.
 <br><br>
 <img src="docs/images/looks-light.png" alt="The See-through and Solid looks side by side, light mode" width="100%">
 <br><sub>…and in light mode.</sub>
+<br><br>
+<img src="docs/images/corners.png" alt="The same folder with rounded corners and with sharper corners" width="100%">
+<br><sub>Rounded or Sharper corners (settings → Corners), for the folder, its menus and the desktop icon.</sub>
 </div>
 
 ## Install
@@ -76,7 +80,7 @@ desktop as files (they'll open again if you reinstall).
 | **Rename** | Click the folder's name at the top, or rename it on the desktop like any file. |
 | **App options** | Right-click an app: open, run as administrator, open file location, rename, move, remove. |
 | **Close** | Click anywhere else, press Esc, or click the **✕**. |
-| **Settings** | The gear next to the ✕: hover-to-open on/off, See-through or Solid, and whether the desktop icon shows 2 × 2 or 3 × 3. |
+| **Settings** | The gear next to the ✕: hover-to-open on/off, See-through or Solid, whether the desktop icon shows 2 × 2 or 3 × 3, and Rounded or Sharper corners. |
 
 <div align="center">
 <img src="docs/images/menus.png" alt="The right-click menu for an app and the settings card, both in the glass style" width="100%">
@@ -146,4 +150,4 @@ That produces `Prysm Folder.exe`. Run it to install, or use `"Prysm Folder.exe" 
 
 [MIT](LICENSE). Free to use, change and share.
 
-Made by Dippy_drippy. Windows is a trademark of Microsoft Corporation; Prysm Folder isn't affiliated with Microsoft.
+Made by Peteboii. Windows is a trademark of Microsoft Corporation; Prysm Folder isn't affiliated with Microsoft.

@@ -270,6 +270,8 @@ static class Settings
 
     public static bool HoverOpen { get { return Get("HoverOpen", 1) != 0; } set { Set("HoverOpen", value ? 1 : 0); } }
     public static bool Glass { get { return Get("Glass", 1) != 0; } set { Set("Glass", value ? 1 : 0); } }
+    // Desktop icon: 3x3 mini-grid once a folder has more than 4 apps (true), or always 2x2 (false)
+    public static bool IconGrid3 { get { return Get("IconGrid3", 1) != 0; } set { Set("IconGrid3", value ? 1 : 0); } }
 }
 
 // Prism's look (same palette as DG-Dock's launchpad): a #202022 panel, white "ink" tints and
@@ -299,8 +301,11 @@ static class Theme
                 light = k != null && Convert.ToInt32(k.GetValue("AppsUseLightTheme", 0)) == 1;
         }
         catch { light = false; }
+        Grid3 = Settings.IconGrid3;
         Apply(light, Settings.Glass);
     }
+
+    public static bool Grid3 = true;   // the Desktop icon's mini-grid can go 3x3 (see Settings.IconGrid3)
 
     public static void Apply(bool light, bool glass)
     {
@@ -350,7 +355,7 @@ static class Theme
     public static int ToBgr(Color c) { return c.R | (c.G << 8) | (c.B << 16); }
 
     // The look a Desktop icon is drawn in; when it changes, the icons are redrawn.
-    public static string LookSig { get { return (Light ? "light" : "dark") + "-" + (Glass ? "glass" : "solid") + "-2"; } }
+    public static string LookSig { get { return (Light ? "light" : "dark") + "-" + (Glass ? "glass" : "solid") + "-g" + (Grid3 ? "3" : "2") + "-2"; } }
 
     // Windows 11's icon font (Segoe Fluent Icons), or Segoe MDL2 Assets on older systems
     public static Font IconFont(float size)
@@ -1446,7 +1451,7 @@ class FolderForm : Form, IGlassHost
                     using (var pen = new Pen(Color.FromArgb(28, 0, 0, 0), line)) g.DrawPath(pen, Rounded(RectangleF.Inflate(box, line, line), size * 0.22f + line));
             }
             Color slot = Theme.Light ? Color.FromArgb(22, 0, 0, 0) : Color.FromArgb(30, 255, 255, 255);
-            int n = list.Count > 4 ? 3 : 2;
+            int n = Theme.Grid3 && list.Count > 4 ? 3 : 2;   // 2x2, or 3x3 for bigger folders if that's the setting
             float inner = size - 2 * m, cell = inner / (n + 0.6f), gap = (inner - n * cell) / (n + 1);
             for (int i = 0; i < n * n; i++)
             {
@@ -1852,8 +1857,8 @@ class SettingsCard : Form, IGlassHost, IFolderChild
     readonly FolderForm folder;
     readonly Action<bool> setLook;
     GlassBackdrop glass;
-    Rectangle hoverRow, toggleRect, segGlass, segSolid;
-    int hot = -1;   // 0 hover row, 1 See-through, 2 Solid
+    Rectangle hoverRow, toggleRect, segGlass, segSolid, seg2, seg3;
+    int hot = -1;   // 0 hover row, 1 See-through, 2 Solid, 3 icon 2x2, 4 icon 3x3
     readonly Font titleFont = Theme.UiFont(11f, FontStyle.Regular, true);
     readonly Font font = Theme.UiFont(9.5f);
     readonly Font small = Theme.UiFont(8.5f);
@@ -1871,13 +1876,16 @@ class SettingsCard : Form, IGlassHost, IFolderChild
         BackColor = Theme.Bg;
         if (Theme.Glass) TransparencyKey = Theme.Key;
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
-        ClientSize = new Size(Px(292), Px(184));
+        ClientSize = new Size(Px(292), Px(262));
         int pad = Px(14);
         hoverRow = new Rectangle(pad - Px(6), Px(46), ClientSize.Width - 2 * pad + Px(12), Px(48));
         toggleRect = new Rectangle(ClientSize.Width - pad - Px(40), hoverRow.Y + (hoverRow.Height - Px(20)) / 2, Px(40), Px(20));
         int segY = Px(130), segH = Px(36), half = (ClientSize.Width - 2 * pad) / 2;
         segGlass = new Rectangle(pad, segY, half, segH);
         segSolid = new Rectangle(pad + half, segY, ClientSize.Width - 2 * pad - half, segH);
+        int gridY = Px(210);
+        seg2 = new Rectangle(pad, gridY, half, segH);
+        seg3 = new Rectangle(pad + half, gridY, ClientSize.Width - 2 * pad - half, segH);
         Cursor = Cursors.Hand;
     }
 
@@ -1958,7 +1966,11 @@ class SettingsCard : Form, IGlassHost, IFolderChild
         if (glass != null && !glass.IsDisposed) { try { Owner = null; glass.Close(); glass.Dispose(); } catch { } }
     }
 
-    int HitTest(Point p) { return hoverRow.Contains(p) ? 0 : segGlass.Contains(p) ? 1 : segSolid.Contains(p) ? 2 : -1; }
+    int HitTest(Point p)
+    {
+        return hoverRow.Contains(p) ? 0 : segGlass.Contains(p) ? 1 : segSolid.Contains(p) ? 2
+             : seg2.Contains(p) ? 3 : seg3.Contains(p) ? 4 : -1;
+    }
 
     protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); SetHot(HitTest(e.Location)); }
     protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); SetHot(-1); }
@@ -1977,6 +1989,15 @@ class SettingsCard : Form, IGlassHost, IFolderChild
                 break;
             case 1: if (!Theme.Glass) { Close(); setLook(true); } break;
             case 2: if (Theme.Glass) { Close(); setLook(false); } break;
+            case 3: case 4:
+                bool grid3 = HitTest(p) == 4;
+                if (grid3 == Theme.Grid3) return;
+                Settings.IconGrid3 = grid3;
+                Theme.Grid3 = grid3;
+                Invalidate();
+                Update();
+                FolderForm.RefreshAllIcons();   // redraw every folder's Desktop icon with the new grid
+                break;
         }
     }
 
@@ -2011,6 +2032,17 @@ class SettingsCard : Form, IGlassHost, IFolderChild
         }
         DrawSegment(g, segGlass, "See-through", Theme.Glass, hot == 1);
         DrawSegment(g, segSolid, "Solid", !Theme.Glass, hot == 2);
+
+        // Desktop icon:  [ 2 × 2 | 3 × 3 ]   (3 × 3 kicks in once a folder has more than 4 apps)
+        FolderForm.DrawLabel(g, "Desktop icon, with more than 4 apps", small, new Rectangle(pad, Px(184), Width - 2 * pad, Px(20)), Theme.Dim, false);
+        var track2 = Rectangle.Union(seg2, seg3);
+        using (var p = FolderForm.Rounded(track2, track2.Height / 2f))
+        {
+            if (Theme.Glass) using (var pen = new Pen(Theme.Ink18, 1.2f * FolderForm.S)) g.DrawPath(pen, p);
+            else using (var b = new SolidBrush(Theme.Ink08)) g.FillPath(b, p);
+        }
+        DrawSegment(g, seg2, "2 × 2", !Theme.Grid3, hot == 3);
+        DrawSegment(g, seg3, "3 × 3", Theme.Grid3, hot == 4);
     }
 
     void FillOrOutline(Graphics g, Rectangle r, float rad, Color c)
@@ -3332,7 +3364,7 @@ static class Promo
         Directory.CreateDirectory(outDir);
         tmp = Path.Combine(Path.GetTempPath(), "PrysmPromo");
         Directory.CreateDirectory(tmp);
-        FolderForm.S = 2f; Theme.FontScale = 2f; Native.Jumbo = true;
+        FolderForm.S = 2f; Theme.FontScale = 2f; Native.Jumbo = true; Theme.Grid3 = true;
 
         string fav = MakeFolder("Favourites", new[] {
             @"C:\Windows\explorer.exe|File Explorer",
@@ -3354,6 +3386,7 @@ static class Promo
         Looks(Path.Combine(outDir, "looks-light.png"), fav, true);
         Menus(Path.Combine(outDir, "menus.png"), fav);
         Icons(Path.Combine(outDir, "desktop-icons.png"), fav);
+        IconGrid(Path.Combine(outDir, "icon-grid.png"), fav);
         using (var icon = AppIcon(256))
         {
             icon.Save(Path.Combine(outDir, "icon.png"), ImageFormat.Png);
@@ -3607,6 +3640,27 @@ static class Promo
                     Caption(g, (light ? "Light" : "Dark") + ", " + (glass ? "see-through" : "solid"), new Rectangle(x - 60, 280, 310, 60), 11f, false, true);
                     x += 350;
                 }
+            wall.Save(outPng, ImageFormat.Png);
+        }
+    }
+
+    // The same folder (more than 4 apps) as a 2 x 2 and as a 3 x 3 Desktop icon
+    static void IconGrid(string outPng, string fav)
+    {
+        var items = ItemsOf(fav);
+        Theme.Apply(false, true);
+        using (var wall = Wallpaper(1100, 420, false))
+        using (var g = Graphics.FromImage(wall))
+        {
+            int x = 200;
+            foreach (bool grid3 in new[] { false, true })
+            {
+                Theme.Grid3 = grid3;
+                using (var icon = FolderForm.RenderPreview(items, 256)) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.DrawImage(icon, x, 60, 220, 220); }
+                Caption(g, grid3 ? "3 × 3" : "2 × 2", new Rectangle(x - 60, 300, 340, 60), 14f, true, true);
+                x += 480;
+            }
+            Theme.Grid3 = true;
             wall.Save(outPng, ImageFormat.Png);
         }
     }

@@ -1,4 +1,4 @@
-﻿<div align="center">
+<div align="center">
 
 <img src="docs/images/icon.png" width="112" alt="Prysm Folder icon">
 
@@ -8,7 +8,7 @@
 Group your apps, folders and websites into a folder that opens the moment you point at it,
 in a glassy Windows 11 style.
 
-[**â¬‡ Download the latest version**](../../releases/latest) &nbsp;Â·&nbsp; Windows 11 &nbsp;Â·&nbsp; Free &amp; open source (MIT)
+[**⬇ Download the latest version**](../../releases/latest) &nbsp;·&nbsp; Windows 11 &nbsp;·&nbsp; Free &amp; open source (MIT)
 
 <img src="docs/images/hero.png" alt="A Prysm Folder open on the Windows desktop, showing apps in a see-through glass panel" width="100%">
 
@@ -26,12 +26,13 @@ you click something else.
 
 ## Features
 
-- **Make a folder right on the desktop.** Right-click the desktop â†’ **New â†’ Prysm Folder**, type a name. Done.
+- **Make a folder right on the desktop.** Right-click the desktop → **New → Prysm Folder**, type a name. Done.
 - **Opens when you point at it.** No clicking needed: rest the pointer on the folder and it pops open with a
   springy animation. Move away and it closes. (Double-clicking works too, and you can turn hovering off.)
 - **Put anything in it.** Apps, shortcuts, files, folders and websites. Drag them onto the folder's icon, or
   pause on the icon mid-drag and the folder **springs open** so you can drop them exactly where you want.
-- **Live icon.** The desktop icon is a mini-grid of what's inside, just like on a phone.
+- **Live icon.** The desktop icon is a mini-grid of what's inside, just like on a phone: 2 × 2, or 3 × 3 for
+  bigger folders (your choice in settings).
 - **Two looks, light or dark.** **See-through** blurred glass, or a **Solid** panel. Both follow Windows'
   light/dark mode, and the desktop icon matches.
 - **Phone-style reordering.** Drag an app and the others slide out of the way.
@@ -41,41 +42,41 @@ you click something else.
 
 <div align="center">
 <img src="docs/images/looks-dark.png" alt="The See-through and Solid looks side by side, dark mode" width="100%">
-<br><sub>See-through and Solid, in dark modeâ€¦</sub>
+<br><sub>See-through and Solid, in dark mode…</sub>
 <br><br>
 <img src="docs/images/looks-light.png" alt="The See-through and Solid looks side by side, light mode" width="100%">
-<br><sub>â€¦and in light mode.</sub>
+<br><sub>…and in light mode.</sub>
 </div>
 
 ## Install
 
-1. Download **`Prysm Folder.exe`** from the [latest release](../../releases/latest).
+1. Download **`Prysm.Folder.exe`** from the [latest release](../../releases/latest).
 2. Double-click it and choose **Yes** to install.
 3. Click **Yes** on the Windows permission prompt. (Windows 11 only lists a new file type in the
    right-click **New** menu if it's registered for the whole PC; that's the only thing it's needed for.
-   If you skip it, Prysm Folder still works, but **New â†’ Prysm Folder** is only under **Show more options**.)
+   If you skip it, Prysm Folder still works, but **New → Prysm Folder** is only under **Show more options**.)
 
 > **"Windows protected your PC"?** New apps that aren't code-signed yet get this warning.
-> Click **More info â†’ Run anyway**. The full source code is right here if you'd like to check it, or
+> Click **More info → Run anyway**. The full source code is right here if you'd like to check it, or
 > [build it yourself](#build-it-yourself).
 
 Prysm Folder installs just for your account, into `%LOCALAPPDATA%\Programs\Prysm Folder`.
-To remove it: **Settings â†’ Apps â†’ Installed apps â†’ Prysm Folder â†’ Uninstall**. Your folders stay on the
+To remove it: **Settings → Apps → Installed apps → Prysm Folder → Uninstall**. Your folders stay on the
 desktop as files (they'll open again if you reinstall).
 
 ## How to use it
 
 | | |
 |---|---|
-| **Make a folder** | Right-click the desktop â†’ **New â†’ Prysm Folder** and type a name. |
+| **Make a folder** | Right-click the desktop → **New → Prysm Folder** and type a name. |
 | **Open it** | Point at it (or double-click it). |
 | **Add things** | Drag apps, files or folders onto its icon (or pause there to drop them inside). Or click **+** inside the folder for **Apps or files**, **A folder** or **A website**. Ctrl+V pastes copied files. |
 | **Open something** | Click it. The folder closes itself. |
 | **Reorder** | Drag an app to a new spot. |
 | **Rename** | Click the folder's name at the top, or rename it on the desktop like any file. |
 | **App options** | Right-click an app: open, run as administrator, open file location, rename, move, remove. |
-| **Close** | Click anywhere else, press Esc, or click the **âœ•**. |
-| **Settings** | The gear next to the âœ•: hover-to-open on/off, and See-through or Solid. |
+| **Close** | Click anywhere else, press Esc, or click the **✕**. |
+| **Settings** | The gear next to the ✕: hover-to-open on/off, See-through or Solid, and whether the desktop icon shows 2 × 2 or 3 × 3. |
 
 <div align="center">
 <img src="docs/images/menus.png" alt="The right-click menu for an app and the settings card, both in the glass style" width="100%">
@@ -90,6 +91,13 @@ Each folder's icon shows the first apps inside it, and its frame follows your lo
 <img src="docs/images/desktop-icons.png" alt="The folder icon in dark see-through, dark solid, light see-through and light solid" width="100%">
 </div>
 
+Once a folder has more than 4 apps, its icon can show the first **4** (2 × 2) or the first **9** (3 × 3).
+Pick in the folder's settings (the gear) → **Desktop icon**. Every folder's icon updates straight away.
+
+<div align="center">
+<img src="docs/images/icon-grid.png" alt="The same folder icon as a 2 by 2 grid and as a 3 by 3 grid" width="80%">
+</div>
+
 ## FAQ
 
 **Does it run in the background?**
@@ -102,7 +110,7 @@ so you can move, copy, back up or delete it like any other file. Settings live i
 `HKEY_CURRENT_USER\Software\AppFolder`.
 
 **Hovering doesn't open my folders.**
-Check the gear â†’ **Open by hovering** is on. Opening any folder by double-clicking also restarts the
+Check the gear → **Open by hovering** is on. Opening any folder by double-clicking also restarts the
 hover helper if it isn't running. A log is kept at `%TEMP%\PrysmFolder.log`.
 
 **A folder's icon on the desktop didn't update.**

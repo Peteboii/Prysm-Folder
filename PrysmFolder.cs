@@ -1248,6 +1248,28 @@ class FolderForm : Form, IGlassHost, IDecoHost
     // The gear: Prysm's settings card, just below it, right-aligned with it.
     public void TestShowSettings() { ShowSettings(); }   // for the edge self-test
 
+    // ---- for the demo GIF: pose states and find where things are (client coordinates) ----
+    public void PromoHover(int tileIndex)
+    {
+        int i = 0;
+        foreach (Control c in grid.Controls)
+        {
+            var t = c as Tile;
+            if (t == null) continue;
+            int idx = t.Item == null ? items.Count : items.IndexOf(t.Item);
+            bool on = idx == tileIndex;
+            if (t.Hover != on) { t.Hover = on; t.Invalidate(); }
+            i++;
+        }
+        closeBtn.SetHover(tileIndex == -2);
+        gearBtn.SetHover(tileIndex == -3);
+        Refresh();
+    }
+    public Rectangle PromoTileRect(int i) { var p = SlotOf(i); return new Rectangle(grid.Left + p.X, grid.Top + p.Y, TileW, TileH); }
+    public int PromoTileCount { get { return items.Count + 1; } }
+    public Rectangle PromoGearRect { get { return gearBtn.Bounds; } }
+    public Rectangle PromoCloseRect { get { return closeBtn.Bounds; } }
+
     // The gear toggles: click it again while the card is open and the card closes.
     // (Pressing the gear already takes focus from the card, which starts it closing, so a card
     // that began closing a moment ago counts as "was open" too.)
@@ -2109,6 +2131,8 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
     protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); HandleClick(e.Location); }
     void SetHot(int h) { if (h != hot) { hot = h; Invalidate(); } }
     public FolderForm Folder { get { return folder; } }
+    public int PromoHot { set { hot = value; Refresh(); } }   // for the demo GIF
+    public Rectangle PromoSolidRect { get { return segSolid; } }
 
     void HandleClick(Point p)
     {
@@ -2390,6 +2414,10 @@ class PrismMenu : PrismPopup
     public PrismMenu(FolderForm folder) : base(folder, 12) { Cursor = Cursors.Hand; }
 
     public void Add(string text, char glyph, Action action, bool danger = false) { entries.Add(new Entry { Text = text, Glyph = glyph, Do = action, Danger = danger }); }
+    public int PromoHot { set { hot = value; Refresh(); } }                    // for the demo GIF
+    public Rectangle PromoRow(int i) { return entries[i].Bounds; }
+    public int PromoCount { get { return entries.Count; } }
+    public bool PromoIsSeparator(int i) { return entries[i].Separator; }
     public void AddSeparator() { entries.Add(new Entry { Separator = true }); }
 
     public void Measure()
@@ -3710,6 +3738,190 @@ static class Installer
     }
 }
 
+// A small animated-GIF writer for the README demo. One 256-colour palette for the whole
+// animation (median cut over samples of every frame), a light ordered dither (stable from frame
+// to frame, so gradients don't shimmer), and each frame stores only the rectangle that changed,
+// with unchanged pixels transparent, which keeps the file small.
+static class GifWriter
+{
+    public static void Write(string path, List<Bitmap> frames, int delayCs)
+    {
+        var pixels = new List<int[]>();
+        foreach (var f in frames) pixels.Add(ReadPixels(f));
+        Write(path, pixels, frames[0].Width, frames[0].Height, delayCs);
+    }
+
+    public static void Write(string path, List<int[]> pixels, int w, int h, int delayCs)
+    {
+        var palette = BuildPalette(pixels, 255);   // index 255 = transparent
+        var cache = new Dictionary<int, byte>();
+        int[] bayer = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
+
+        using (var fs = File.Create(path))
+        using (var bw = new BinaryWriter(fs))
+        {
+            bw.Write(Encoding.ASCII.GetBytes("GIF89a"));
+            bw.Write((short)w); bw.Write((short)h);
+            bw.Write((byte)0xF7); bw.Write((byte)0); bw.Write((byte)0);
+            for (int i = 0; i < 256; i++)
+            {
+                int c = i < palette.Count ? palette[i] : 0;
+                bw.Write((byte)(c >> 16)); bw.Write((byte)(c >> 8)); bw.Write((byte)c);
+            }
+            bw.Write(new byte[] { 0x21, 0xFF, 0x0B }); bw.Write(Encoding.ASCII.GetBytes("NETSCAPE2.0"));
+            bw.Write(new byte[] { 0x03, 0x01, 0x00, 0x00, 0x00 });   // loop forever
+
+            byte[] prev = null;
+            for (int fi = 0; fi < pixels.Count; fi++)
+            {
+                var px = pixels[fi];
+                var idx = new byte[w * h];
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                    {
+                        int c = px[y * w + x];
+                        int d = bayer[(y & 3) * 4 + (x & 3)] - 8;   // -8..7, small
+                        int r = Clamp(((c >> 16) & 255) + d), g = Clamp(((c >> 8) & 255) + d), b = Clamp((c & 255) + d);
+                        int key = ((r >> 2) << 12) | ((g >> 2) << 6) | (b >> 2);
+                        byte pi;
+                        if (!cache.TryGetValue(key, out pi)) { pi = Nearest(palette, r, g, b); cache[key] = pi; }
+                        idx[y * w + x] = pi;
+                    }
+                // only the changed rectangle; unchanged pixels inside it are transparent
+                int x0 = 0, y0 = 0, x1 = w - 1, y1 = h - 1;
+                if (prev != null)
+                {
+                    x0 = w; y0 = h; x1 = -1; y1 = -1;
+                    for (int y = 0; y < h; y++)
+                        for (int x = 0; x < w; x++)
+                            if (idx[y * w + x] != prev[y * w + x]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+                    if (x1 < 0) { x0 = y0 = 0; x1 = y1 = 0; }
+                }
+                int rw = x1 - x0 + 1, rh = y1 - y0 + 1;
+                var sub = new byte[rw * rh];
+                for (int y = 0; y < rh; y++)
+                    for (int x = 0; x < rw; x++)
+                    {
+                        int i = (y0 + y) * w + x0 + x;
+                        sub[y * rw + x] = (prev != null && idx[i] == prev[i]) ? (byte)255 : idx[i];
+                    }
+                bw.Write(new byte[] { 0x21, 0xF9, 0x04, (byte)((1 << 2) | 1) });   // keep previous frame, transparency on
+                bw.Write((short)delayCs); bw.Write((byte)255); bw.Write((byte)0);
+                bw.Write((byte)0x2C); bw.Write((short)x0); bw.Write((short)y0); bw.Write((short)rw); bw.Write((short)rh); bw.Write((byte)0);
+                Lzw(bw, sub);
+                prev = idx;
+            }
+            bw.Write((byte)0x3B);
+        }
+    }
+
+    static int Clamp(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
+
+    public static int[] ReadPixels(Bitmap b)
+    {
+        var r = new Rectangle(0, 0, b.Width, b.Height);
+        var data = b.LockBits(r, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        var px = new int[b.Width * b.Height];
+        Marshal.Copy(data.Scan0, px, 0, px.Length);
+        b.UnlockBits(data);
+        for (int i = 0; i < px.Length; i++) px[i] &= 0xFFFFFF;
+        return px;
+    }
+
+    static byte Nearest(List<int> pal, int r, int g, int b)
+    {
+        int best = 0, bestD = int.MaxValue;
+        for (int i = 0; i < pal.Count; i++)
+        {
+            int c = pal[i], dr = ((c >> 16) & 255) - r, dg = ((c >> 8) & 255) - g, db = (c & 255) - b;
+            int d = dr * dr * 3 + dg * dg * 4 + db * db * 2;
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        return (byte)best;
+    }
+
+    // median cut over a sample of every frame's pixels
+    static List<int> BuildPalette(List<int[]> frames, int count)
+    {
+        var sample = new List<int>();
+        foreach (var px in frames)
+            for (int i = 0; i < px.Length; i += 23) sample.Add(px[i]);
+        var boxes = new List<List<int>> { sample };
+        while (boxes.Count < count)
+        {
+            int bi = -1, bestRange = 0, bestCh = 0;
+            for (int i = 0; i < boxes.Count; i++)
+            {
+                if (boxes[i].Count < 2) continue;
+                for (int ch = 0; ch < 3; ch++)
+                {
+                    int lo = 255, hi = 0, sh = 16 - ch * 8;
+                    foreach (var c in boxes[i]) { int v = (c >> sh) & 255; if (v < lo) lo = v; if (v > hi) hi = v; }
+                    int range = (hi - lo) * (ch == 1 ? 4 : 3) * (int)Math.Sqrt(boxes[i].Count);
+                    if (range > bestRange) { bestRange = range; bi = i; bestCh = ch; }
+                }
+            }
+            if (bi < 0) break;
+            var box = boxes[bi];
+            int s = 16 - bestCh * 8;
+            box.Sort((a, b) => ((a >> s) & 255).CompareTo((b >> s) & 255));
+            int mid = box.Count / 2;
+            boxes[bi] = box.GetRange(0, mid);
+            boxes.Add(box.GetRange(mid, box.Count - mid));
+        }
+        var pal = new List<int>();
+        foreach (var box in boxes)
+        {
+            long r = 0, g = 0, b = 0;
+            foreach (var c in box) { r += (c >> 16) & 255; g += (c >> 8) & 255; b += c & 255; }
+            int n = Math.Max(1, box.Count);
+            pal.Add((int)(r / n) << 16 | (int)(g / n) << 8 | (int)(b / n));
+        }
+        return pal;
+    }
+
+    // GIF's LZW, 8-bit codes, variable code size up to 12 bits
+    static void Lzw(BinaryWriter bw, byte[] data)
+    {
+        const int minSize = 8, clear = 256, eoi = 257;
+        bw.Write((byte)minSize);
+        var outBytes = new List<byte>();
+        // (the same code-size rule as the classic GIF encoders: widen after a code is written once
+        // the next free code no longer fits; reset to 9 bits right after a clear code)
+        int bitBuf = 0, bitCount = 0, nBits = minSize + 1, maxCode = (1 << nBits) - 1, freeEnt = eoi + 1;
+        bool clearFlag = false;
+        var dict = new Dictionary<int, int>();
+        Action<int> emit = code =>
+        {
+            bitBuf |= code << bitCount; bitCount += nBits;
+            while (bitCount >= 8) { outBytes.Add((byte)(bitBuf & 255)); bitBuf >>= 8; bitCount -= 8; }
+            if (clearFlag) { nBits = minSize + 1; maxCode = (1 << nBits) - 1; clearFlag = false; }
+            else if (freeEnt > maxCode) { nBits++; maxCode = nBits == 12 ? 4096 : (1 << nBits) - 1; }
+        };
+        emit(clear);
+        int ent = data.Length > 0 ? data[0] : 0;
+        for (int i = 1; i < data.Length; i++)
+        {
+            int k = data[i], key = (ent << 8) | k, code;
+            if (dict.TryGetValue(key, out code)) { ent = code; continue; }
+            emit(ent);
+            if (freeEnt < 4096) dict[key] = freeEnt++;
+            else { dict.Clear(); freeEnt = eoi + 1; clearFlag = true; emit(clear); }
+            ent = k;
+        }
+        emit(ent);
+        emit(eoi);
+        if (bitCount > 0) outBytes.Add((byte)(bitBuf & 255));
+        for (int i = 0; i < outBytes.Count; i += 255)
+        {
+            int n = Math.Min(255, outBytes.Count - i);
+            bw.Write((byte)n);
+            for (int j = 0; j < n; j++) bw.Write(outBytes[i + j]);
+        }
+        bw.Write((byte)0);
+    }
+}
+
 // Draws the README pictures ("Prysm Folder.exe" --promo <folder>): the app at 2x over a generated
 // wallpaper, with the see-through glass recreated in the image (blur, Prism tint, sheen, rim),
 // so no real screen needs capturing. Also makes the app icon.
@@ -4005,6 +4217,286 @@ static class Promo
         }
     }
 
+    // ================= the demo GIF ("Prysm Folder.exe" --demo out.gif) =================
+    // An 8-second session drawn frame by frame with the app's own rendering and its real
+    // animation timings: point at a folder (it springs open), hover the apps, right-click for the
+    // menu, open settings and switch to Solid, then click away (it closes).
+    public static void Demo(string outGif)
+    {
+        tmp = Path.Combine(Path.GetTempPath(), "PrysmPromo");
+        Directory.CreateDirectory(tmp);
+        FolderForm.S = 1.25f; Theme.FontScale = 1.25f; Native.Jumbo = true; Theme.Grid3 = true; Theme.Sharp = false;
+        Decor.Disabled = true;
+        const int W = 1000, H = 600, FPS = 20;
+        const float T = 8.2f;
+
+        string fav = MakeFolder("Favourites", new[] {
+            @"C:\Windows\explorer.exe|File Explorer", @"C:\Windows\System32\notepad.exe|Notepad",
+            @"C:\Windows\System32\calc.exe|Calculator",
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads") + "|Downloads",
+            @"C:\Windows\System32\Taskmgr.exe|Task Manager", "https://github.com|github.com" });
+        string tools = MakeFolder("Tools", new[] {
+            @"C:\Windows\System32\cmd.exe|Command Prompt", @"C:\Windows\System32\control.exe|Control Panel",
+            @"C:\Windows\regedit.exe|Registry Editor", @"C:\Windows\System32\mmc.exe|Console" });
+        string work = MakeFolder("Work", new[] {
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments) + "|Documents",
+            @"C:\Windows\System32\notepad.exe|Notepad", @"C:\Windows\System32\SnippingTool.exe|Snipping Tool" });
+
+        // ---- the desktop ----
+        Theme.Apply(false, true);
+        var desk = Wallpaper(W, H, false);
+        var iconSpots = new List<Point>();
+        using (var g = Graphics.FromImage(desk))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            int y = 34;
+            foreach (var f in new[] { fav, tools, work })
+            {
+                using (var ic = FolderForm.RenderPreview(ItemsOf(f), 256)) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.DrawImage(ic, 34, y, 84, 84); }
+                Caption(g, Path.GetFileNameWithoutExtension(f), new Rectangle(4, y + 88, 144, 30), 6.2f, false, true);
+                iconSpots.Add(new Point(34 + 42, y + 42));
+                y += 150;
+            }
+        }
+
+        // ---- every state of the folder, menu and settings, captured once ----
+        var folderAt = new Point(170, 40);
+        var glassForm = OpenOffscreen(fav);
+        var fRect = new Rectangle(folderAt, glassForm.Size);
+        Func<int, Bitmap> pose = hover => { glassForm.PromoHover(hover); return Capture(glassForm); };
+        var glassStates = new Dictionary<int, Bitmap> { { -1, pose(-1) }, { 1, pose(1) }, { -3, pose(-3) } };
+        Rectangle tileNotepad = Off(glassForm.PromoTileRect(1), folderAt), tileExplorer = Off(glassForm.PromoTileRect(0), folderAt);
+        Rectangle gear = Off(glassForm.PromoGearRect, folderAt), close = Off(glassForm.PromoCloseRect, folderAt);
+
+        var menu = new PrismMenu(glassForm);
+        menu.Add("Open", '\uE8A7', null); menu.Add("Run as administrator", '\uE7EF', null); menu.Add("Open file location", '\uE838', null);
+        menu.AddSeparator(); menu.Add("Rename", '\uE8AC', null); menu.Add("Move right", '\uE76C', null);
+        menu.AddSeparator(); menu.Add("Remove from folder", '\uE74D', null, true);
+        menu.Measure();
+        var menuAt = new Point(tileNotepad.X + tileNotepad.Width / 2 + 6, tileNotepad.Y + tileNotepad.Height / 2 + 6);
+        var menuStates = new Dictionary<int, Bitmap>();
+        foreach (int h in new[] { -1, 0, 1, 2, 4 }) { menu.PromoHot = h; menuStates[h] = Capture(menu); }
+        Func<int, Rectangle> menuRow = i => Off(menu.PromoRow(i), menuAt);
+
+        var card = new SettingsCard(glassForm, x => { });
+        var cardAt = new Point(close.Right - card.Width, gear.Bottom + (int)(8 * FolderForm.S));
+        var cardStates = new Dictionary<int, Bitmap>();
+        foreach (int h in new[] { -1, 2 }) { card.PromoHot = h; cardStates[h] = Capture(card); }
+        var solidPill = Off(card.PromoSolidRect, cardAt);
+
+        // the glass layers (blur of the desktop behind them), made once per state
+        var layers = new Dictionary<string, Bitmap>();
+        Func<string, Rectangle, float, Bitmap, Bitmap> layer = (key, r, rad, content) =>
+        {
+            Bitmap b;
+            if (!layers.TryGetValue(key, out b)) layers[key] = b = CardLayer(desk, r, rad, content);
+            return b;
+        };
+        float folderRad = 24 * FolderForm.S;
+        foreach (var kv in glassStates) layer("g" + kv.Key, fRect, folderRad, kv.Value);
+        foreach (var kv in menuStates) layer("m" + kv.Key, new Rectangle(menuAt, menu.Size), 12 * FolderForm.S, kv.Value);
+        foreach (var kv in cardStates) layer("c" + kv.Key, new Rectangle(cardAt, card.Size), 16 * FolderForm.S, kv.Value);
+        menu.Dispose(); card.Dispose(); glassForm.Dispose();
+
+        Theme.Apply(false, false);   // the Solid look
+        var solidForm = OpenOffscreen(fav);
+        solidForm.PromoHover(-1); var solidPlain = Capture(solidForm);
+        solidForm.PromoHover(0); var solidHover = Capture(solidForm);
+        solidForm.Dispose();
+        layer("s-1", fRect, folderRad, solidPlain);
+        layer("s0", fRect, folderRad, solidHover);
+        Theme.Apply(false, true);
+
+        // ---- the script ----
+        var cursorPath = new List<KeyValuePair<float, PointF>>();
+        Action<float, PointF> at = (t, p) => cursorPath.Add(new KeyValuePair<float, PointF>(t, p));
+        Func<Rectangle, PointF> mid = r => new PointF(r.X + r.Width / 2f, r.Y + r.Height / 2f);
+        var favIcon = iconSpots[0];
+        at(0.0f, new PointF(840, 480)); at(0.85f, favIcon); at(1.7f, favIcon);
+        at(2.4f, new PointF(mid(tileNotepad).X, mid(tileNotepad).Y - 10)); at(2.65f, new PointF(mid(tileNotepad).X, mid(tileNotepad).Y - 10));
+        PointF m0 = menuAt;
+        at(2.95f, new PointF(m0.X + 60, mid(menuRow(0)).Y)); at(3.2f, new PointF(m0.X + 70, mid(menuRow(1)).Y));
+        at(3.45f, new PointF(m0.X + 70, mid(menuRow(2)).Y)); at(3.7f, new PointF(m0.X + 70, mid(menuRow(4)).Y));
+        at(4.1f, new PointF(fRect.X + 90, fRect.Bottom - 30)); at(4.25f, new PointF(fRect.X + 90, fRect.Bottom - 30));
+        at(4.8f, mid(gear)); at(5.0f, mid(gear));
+        at(5.55f, mid(solidPill)); at(5.75f, mid(solidPill));
+        at(6.5f, mid(tileExplorer)); at(6.8f, mid(tileExplorer));
+        at(7.35f, new PointF(880, 470)); at(T, new PointF(840, 480));
+
+        float openAt = 0.95f, menuOpen = 2.7f, menuClose = 4.25f, cardOpen = 5.0f, solidSwitch = 5.8f, closeAt = 7.4f;
+        var clicks = new[] { new KeyValuePair<float, bool>(2.7f, true), new KeyValuePair<float, bool>(4.25f, false),
+                             new KeyValuePair<float, bool>(5.0f, false), new KeyValuePair<float, bool>(5.8f, false), new KeyValuePair<float, bool>(7.4f, false) };
+        var captions = new[] {
+            Tuple.Create(0.25f, 2.55f, "Point at a folder to open it"),
+            Tuple.Create(2.6f, 4.3f, "Right-click an app for options"),
+            Tuple.Create(4.4f, 6.9f, "Settings: See-through or Solid"),
+            Tuple.Create(7.0f, T, "Click anywhere else to close") };
+
+        var frames = new List<int[]>();
+        int n = (int)(T * FPS);
+        for (int fi = 0; fi < n; fi++)
+        {
+            float t = fi / (float)FPS;
+            using (var frame = (Bitmap)desk.Clone())
+            using (var g = Graphics.FromImage(frame))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                var cur = CursorAt(cursorPath, t);
+
+                // the folder: glass until the switch, then Solid; springs open, shrinks away at the end
+                bool solid = t >= solidSwitch + 0.12f;
+                string key;
+                if (!solid)
+                {
+                    int hover = -1;
+                    if (t >= 2.25f && t < 2.75f) hover = 1;
+                    else if (t >= 4.7f && t < 5.05f) hover = -3;
+                    key = "g" + hover;
+                }
+                else key = (t >= 6.4f && t < 7.4f) ? "s0" : "s-1";
+                float s = 1, a = 1;
+                if (t < openAt) a = 0;
+                else if (t < solidSwitch)
+                {
+                    Spring(t - openAt, 0.1f, out s, out a);
+                    if (t >= solidSwitch - 0.0001f) { }
+                }
+                if (t >= solidSwitch && t < solidSwitch + 0.12f) { float e = (t - solidSwitch) / 0.12f; s = 1 - 0.07f * e; a = 1 - e * e; }
+                else if (t >= solidSwitch + 0.12f && t < closeAt) Spring(t - solidSwitch - 0.12f, 0.1f, out s, out a);
+                if (t >= closeAt) { float e = Math.Min(1, (t - closeAt) / 0.12f); s = 1 - 0.07f * e; a = 1 - e * e; }
+                if (a > 0.01f) DrawLayer(g, layers[key], fRect, s, a);
+
+                // the right-click menu
+                if (t >= menuOpen && t < menuClose + 0.09f)
+                {
+                    int hot = -1;
+                    float my = cur.Y;
+                    foreach (int i in new[] { 0, 1, 2, 4 }) if (cur.X > menuAt.X && menuRow(i).Contains((int)cur.X, (int)my)) hot = i;
+                    float ms, ma;
+                    if (t < menuClose) Spring(t - menuOpen, 0.06f, out ms, out ma);
+                    else { float e = (t - menuClose) / 0.09f; ms = 1 - 0.05f * e; ma = 1 - e * e; }
+                    DrawLayer(g, layers["m" + hot], new Rectangle(menuAt, menu.Size), ms, ma, true);
+                }
+                // the settings card
+                if (t >= cardOpen && t < solidSwitch + 0.1f)
+                {
+                    int hot = solidPill.Contains((int)cur.X, (int)cur.Y) ? 2 : -1;
+                    float cs, ca;
+                    if (t < solidSwitch) Spring(t - cardOpen, 0.06f, out cs, out ca);
+                    else { float e = (t - solidSwitch) / 0.1f; cs = 1 - 0.05f * e; ca = 1 - e * e; }
+                    DrawLayer(g, layers["c" + hot], new Rectangle(cardAt, card.Size), cs, ca, true);
+                }
+
+                // clicks: a little ripple (blue for a right-click)
+                foreach (var c in clicks)
+                {
+                    float dt = t - c.Key;
+                    if (dt < 0 || dt > 0.35f) continue;
+                    var cp = CursorAt(cursorPath, c.Key);
+                    float rr = 6 + dt / 0.35f * 20;
+                    using (var p = new Pen(Color.FromArgb((int)(170 * (1 - dt / 0.35f)), c.Value ? Theme.Accent : Color.White), 2.5f))
+                        g.DrawEllipse(p, cp.X - rr, cp.Y - rr, 2 * rr, 2 * rr);
+                }
+
+                // caption
+                foreach (var cap in captions)
+                    if (t >= cap.Item1 && t < cap.Item2)
+                    {
+                        float fade = Math.Min(1, Math.Min((t - cap.Item1) / 0.2f, (cap.Item2 - t) / 0.2f));
+                        CaptionPill(g, cap.Item3, W, H, fade);
+                    }
+
+                DrawCursor(g, cur);
+                frames.Add(GifWriter.ReadPixels(frame));
+            }
+        }
+        GifWriter.Write(outGif, frames, W, H, 100 / FPS);
+    }
+
+    static Rectangle Off(Rectangle r, Point by) { r.Offset(by); return r; }
+
+    // the card as it sits on the desktop (glass or solid, with its shadow), on a transparent layer
+    static Bitmap CardLayer(Bitmap wall, Rectangle r, float radius, Bitmap content)
+    {
+        var lay = new Bitmap(wall.Width, wall.Height, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(lay)) Card(g, wall, r, radius, (Bitmap)content.Clone());
+        return lay;
+    }
+
+    // draws a layer scaled around the card's centre, faded
+    static void DrawLayer(Graphics g, Bitmap lay, Rectangle card, float scale, float alpha, bool clip = false)
+    {
+        float cx = card.X + card.Width / 2f, cy = card.Y + card.Height / 2f;
+        var state = g.Save();
+        g.TranslateTransform(cx, cy);
+        g.ScaleTransform(scale, scale);
+        g.TranslateTransform(-cx, -cy);
+        using (var ia = new ImageAttributes())
+        {
+            var cm = new ColorMatrix { Matrix33 = Math.Max(0, Math.Min(1, alpha)) };
+            ia.SetColorMatrix(cm);
+            var src = Rectangle.Inflate(card, 40, 40);
+            src.Intersect(new Rectangle(0, 0, lay.Width, lay.Height));
+            g.DrawImage(lay, src, src.X, src.Y, src.Width, src.Height, GraphicsUnit.Pixel, ia);
+        }
+        g.Restore(state);
+    }
+
+    // Prism's "settle": scale springs up to 1 with a small overshoot, fading in over 140 ms
+    static void Spring(float t, float amount, out float scale, out float alpha)
+    {
+        scale = 1 - amount * (float)(Math.Exp(-t / 0.09) * Math.Cos(2 * Math.PI * t / 0.32));
+        float f = Math.Min(1, t / 0.14f);
+        alpha = 1 - (1 - f) * (1 - f) * (1 - f);
+    }
+
+    static PointF CursorAt(List<KeyValuePair<float, PointF>> path, float t)
+    {
+        for (int i = 1; i < path.Count; i++)
+        {
+            if (t > path[i].Key) continue;
+            var a = path[i - 1]; var b = path[i];
+            float f = b.Key <= a.Key ? 1 : (t - a.Key) / (b.Key - a.Key);
+            f = Math.Max(0, Math.Min(1, f));
+            f = f * f * (3 - 2 * f);   // ease in and out
+            return new PointF(a.Value.X + (b.Value.X - a.Value.X) * f, a.Value.Y + (b.Value.Y - a.Value.Y) * f);
+        }
+        return path[path.Count - 1].Value;
+    }
+
+    static void DrawCursor(Graphics g, PointF p)
+    {
+        var pts = new[] { new PointF(0, 0), new PointF(0, 17), new PointF(4, 13), new PointF(7, 20), new PointF(9.4f, 19), new PointF(6.4f, 12.2f), new PointF(11.5f, 12.2f) };
+        float k = 1.35f;
+        for (int i = 0; i < pts.Length; i++) pts[i] = new PointF(p.X + pts[i].X * k, p.Y + pts[i].Y * k);
+        using (var sh = new SolidBrush(Color.FromArgb(70, 0, 0, 0)))
+        {
+            var spts = (PointF[])pts.Clone();
+            for (int i = 0; i < spts.Length; i++) spts[i] = new PointF(spts[i].X + 1.5f, spts[i].Y + 2f);
+            g.FillPolygon(sh, spts);
+        }
+        g.FillPolygon(Brushes.White, pts);
+        using (var pen = new Pen(Color.Black, 1.3f) { LineJoin = LineJoin.Round }) g.DrawPolygon(pen, pts);
+    }
+
+    static void CaptionPill(Graphics g, string text, int W, int H, float fade)
+    {
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+        using (var f = new Font(Theme.UiFont(1f).FontFamily, 17f, FontStyle.Regular, GraphicsUnit.Pixel))
+        {
+            var sz = g.MeasureString(text, f);
+            float pw = sz.Width + 34, ph = 36, x = (W - pw) / 2, y = H - ph - 18;
+            using (var path = FolderForm.Rounded(new RectangleF(x, y, pw, ph), ph / 2))
+            {
+                using (var b = new SolidBrush(Color.FromArgb((int)(175 * fade), 12, 12, 20))) g.FillPath(b, path);
+                using (var pen = new Pen(Color.FromArgb((int)(60 * fade), 255, 255, 255), 1f)) g.DrawPath(pen, path);
+            }
+            using (var b = new SolidBrush(Color.FromArgb((int)(255 * fade), 255, 255, 255)))
+                g.DrawString(text, f, b, x + 17, y + (ph - sz.Height) / 2);
+        }
+    }
+
     // GitHub's social preview (1280 x 640): what Discord and others show for the repo link.
     // The app icon and name over the Prism wallpaper, the tagline, and the glass folder rising
     // from the bottom edge with a few folder icons beside it.
@@ -4192,6 +4684,12 @@ static class Program
             }
             catch (Exception ex) { sb.AppendLine("ERROR " + ex); }
             File.WriteAllText(args[2], sb.ToString());
+            return;
+        }
+        if (arg == "--demo" && args.Length > 1)
+        {
+            try { Promo.Demo(args[1]); }
+            catch (Exception ex) { File.WriteAllText(args[1] + ".error.txt", ex.ToString()); }
             return;
         }
         if (arg == "--promo" && args.Length > 1)

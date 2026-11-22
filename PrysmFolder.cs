@@ -376,6 +376,59 @@ static class Theme
     }
 }
 
+// One shape on a control (a pill, a ring, a highlight, a line). Controls describe their shapes
+// as these; on glass they're drawn by Windows' vector renderer in the card layer behind (smooth
+// edges), elsewhere they're painted with GDI+ as usual. (Painted shapes on the see-through window
+// can't be smooth: their soft edge pixels blend into the invisible background colour.)
+class Deco
+{
+    public RectangleF R; public float Radius;
+    public Color Fill = Color.Empty, Stroke = Color.Empty; public float StrokeW = 1f;
+    public bool Ellipse, Dashed, Line, ClipToGrid;
+    public PointF A, B;
+
+    public static Deco Box(RectangleF r, float radius, Color fill) { return new Deco { R = r, Radius = radius, Fill = fill }; }
+    public static Deco Outline(RectangleF r, float radius, Color stroke, float w) { return new Deco { R = r, Radius = radius, Stroke = stroke, StrokeW = w }; }
+    public static Deco Circle(RectangleF r, Color fill, Color stroke, float w) { return new Deco { R = r, Ellipse = true, Fill = fill, Stroke = stroke, StrokeW = w }; }
+    public static Deco Ln(float x1, float y1, float x2, float y2, Color c, float w) { return new Deco { Line = true, A = new PointF(x1, y1), B = new PointF(x2, y2), Stroke = c, StrokeW = w }; }
+
+    public void PaintGdi(Graphics g)
+    {
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        if (Line)
+        {
+            using (var p = new Pen(Stroke, StrokeW) { StartCap = LineCap.Round, EndCap = LineCap.Round }) g.DrawLine(p, A, B);
+            return;
+        }
+        using (var path = Ellipse ? EllipsePath(R) : FolderForm.Rounded(R, Radius))
+        {
+            if (!Fill.IsEmpty) using (var b = new SolidBrush(Fill)) g.FillPath(b, path);
+            if (!Stroke.IsEmpty)
+                using (var p = new Pen(Stroke, StrokeW)) { if (Dashed) p.DashPattern = new[] { 3f, 2.5f }; g.DrawPath(p, path); }
+        }
+    }
+    static GraphicsPath EllipsePath(RectangleF r) { var p = new GraphicsPath(); p.AddEllipse(r); return p; }
+}
+
+// A window whose control shapes can be drawn in its glass layer (see Deco).
+interface IDecoHost
+{
+    bool DecosOn { get; }                // shapes go to the glass layer (and GDI skips them)
+    void CollectDecos(List<Deco> list);  // every shape, in this window's coordinates
+    RectangleF DecoClip { get; }         // where ClipToGrid shapes may show (a scrolling area)
+    void RequestDecos();                 // something changed: redraw the shapes soon
+}
+
+static class Decor
+{
+    public static bool Disabled;   // off for the README pictures (drawn without the glass layer)
+
+    static IDecoHost HostOf(Control c) { return c == null ? null : c.FindForm() as IDecoHost; }
+    public static bool On(Control c) { var h = HostOf(c); return !Disabled && h != null && h.DecosOn; }
+    public static void Request(Control c) { var h = HostOf(c); if (h != null) h.RequestDecos(); }
+    public static void Paint(Graphics g, List<Deco> list) { foreach (var d in list) d.PaintGdi(g); }
+}
+
 // Round 28px button with an X (or a gear), like the buttons on Prism's cards.
 class CloseButton : Control
 {
@@ -392,25 +445,33 @@ class CloseButton : Control
     protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
     // on glass the pointer over the see-through middle reaches the glass, which tells us
     public void SetHover(bool on) { if (hover != on) { hover = on; Invalidate(); } }
+    // the circle (red on hover for the X) and the X itself
+    public void AddDecos(List<Deco> list, float ox, float oy)
+    {
+        float s = FolderForm.S, W = Width, H = Height;
+        bool closeHot = hover && !Gear;
+        if (closeHot)   // the X turns red on hover, like Windows 11's close button
+            list.Add(Deco.Circle(new RectangleF(ox + 0.5f, oy + 0.5f, W - 2, H - 2), Color.FromArgb(0xc4, 0x2b, 0x1c), Color.Empty, 0));
+        else if (Theme.Glass)   // on glass: a frosted-looking ring (a solid disc would read as a grey sticker)
+            list.Add(Deco.Circle(new RectangleF(ox + 1, oy + 1, W - 3, H - 3), Color.Empty, hover ? Theme.Dim : Theme.Ink18, 1.2f * s));
+        else
+            list.Add(Deco.Circle(new RectangleF(ox, oy, W - 1, H - 1), hover ? Theme.Ink12 : Theme.Ink08, Color.Empty, 0));
+        if (!Gear)
+        {
+            float c = W / 2f, r = W * 0.16f;
+            Color col = closeHot ? Color.White : Theme.Fg2;
+            list.Add(Deco.Ln(ox + c - r, oy + c - r, ox + c + r, oy + c + r, col, 1.5f * s));
+            list.Add(Deco.Ln(ox + c - r, oy + c + r, ox + c + r, oy + c - r, col, 1.5f * s));
+        }
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         g.Clear(Theme.Bg);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        bool closeHot = hover && !Gear;
-        if (closeHot)
-        {
-            // the X turns red on hover, like Windows 11's close button
-            using (var b = new SolidBrush(Color.FromArgb(0xc4, 0x2b, 0x1c))) g.FillEllipse(b, 0.5f, 0.5f, Width - 2, Height - 2);
-        }
-        else if (Theme.Glass)
-        {
-            // on glass: a frosted-looking ring (a solid disc would read as a grey sticker)
-            using (var p = new Pen(hover ? Theme.Dim : Theme.Ink18, 1.2f * FolderForm.S))
-                g.DrawEllipse(p, 1, 1, Width - 3, Height - 3);
-        }
-        else
-            using (var b = new SolidBrush(hover ? Theme.Ink12 : Theme.Ink08)) g.FillEllipse(b, 0, 0, Width - 1, Height - 1);
+        if (Decor.On(this)) Decor.Request(this);
+        else { var l = new List<Deco>(); AddDecos(l, 0, 0); Decor.Paint(g, l); }
         if (Gear)
         {
             // Windows 11's own settings glyph (Segoe Fluent Icons; MDL2 Assets on older systems)
@@ -422,13 +483,6 @@ class CloseButton : Control
             using (var b = new SolidBrush(hover ? Theme.Fg : Theme.Fg2))
             using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                 g.DrawString("", gearFont, b, new RectangleF(0, 1, Width, Height), sf);
-            return;
-        }
-        float c = Width / 2f, r = Width * 0.16f;
-        using (var p = new Pen(closeHot ? Color.White : Theme.Fg2, 1.5f * FolderForm.S) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-        {
-            g.DrawLine(p, c - r, c - r, c + r, c + r);
-            g.DrawLine(p, c - r, c + r, c + r, c - r);
         }
     }
 }
@@ -455,6 +509,49 @@ class Tile : Control
     protected override void OnMouseEnter(EventArgs e) { Hover = true; Invalidate(); base.OnMouseEnter(e); }
     protected override void OnMouseLeave(EventArgs e) { Hover = false; Invalidate(); base.OnMouseLeave(e); }
 
+    Rectangle IconRect
+    {
+        get { int iconSize = (int)(48 * FolderForm.S); return new Rectangle((Width - iconSize) / 2, (int)(12 * FolderForm.S), iconSize, iconSize); }
+    }
+
+    // this tile's shapes: hover / picked-up outline, drop ring, the dashed "+" slot
+    public void AddDecos(List<Deco> list, float ox, float oy)
+    {
+        float s = FolderForm.S;
+        var whole = new RectangleF(ox + 2 * s, oy + 2 * s, Width - 4 * s, Height - 4 * s);
+        float rad = Theme.Radius(16) * s;
+        var mine = new List<Deco>();
+        if (Lifted) mine.Add(Deco.Outline(whole, rad, Theme.Accent, 2f * s));   // picked up: Prism blue
+        else if (Hover || DropTarget)
+            mine.Add(Theme.Glass ? Deco.Outline(whole, rad, Theme.Ink18, 1.2f * s)   // glass: a soft outline
+                                 : Deco.Box(whole, rad, Theme.Ink07));
+        var ic = IconRect;
+        ic.Offset((int)ox, (int)oy);
+        if (DropTarget)
+        {
+            var ring = RectangleF.Inflate(ic, 3 * s, 3 * s);
+            mine.Add(Deco.Outline(ring, ring.Width * 0.24f, Theme.Accent, 2.5f * s));
+        }
+        if (Item == null)
+        {
+            // Prism's drop slot: dashed rounded square with a plus
+            var r = RectangleF.Inflate(ic, -2 * s, -2 * s);
+            var dash = Deco.Outline(r, r.Width * 0.24f, Hover ? Theme.Dim : Color.FromArgb(115, 128, 128, 128), 1.5f * s);
+            dash.Dashed = true;
+            mine.Add(dash);
+            float c = r.X + r.Width / 2f, m = r.Y + r.Height / 2f, k = r.Width * 0.18f;
+            Color plus = Hover ? Theme.Fg : Theme.Dim;
+            mine.Add(Deco.Ln(c - k, m, c + k, m, plus, 1.6f * s));
+            mine.Add(Deco.Ln(c, m - k, c, m + k, plus, 1.6f * s));
+        }
+        else if (Item.Icon == null)
+            mine.Add(Deco.Box(ic, ic.Width * 0.22f, Theme.Ink08));   // icon not found
+        foreach (var d in mine) d.ClipToGrid = true;
+        list.AddRange(mine);
+    }
+
+    protected override void OnLocationChanged(EventArgs e) { base.OnLocationChanged(e); if (Decor.On(this)) Decor.Request(this); }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
@@ -462,65 +559,43 @@ class Tile : Control
         g.InterpolationMode = InterpolationMode.HighQualityBicubic;
         g.Clear(Theme.Bg);
         float s = FolderForm.S;
-        if (Lifted)
-        {
-            // picked up: a Prism-blue outline around the whole tile
-            using (var p = FolderForm.Rounded(new RectangleF(2 * s, 2 * s, Width - 4 * s, Height - 4 * s), Theme.Radius(16) * s))
-            using (var pen = new Pen(Theme.Accent, 2f * s)) g.DrawPath(pen, p);
-        }
-        else if (Hover || DropTarget)
-        {
-            using (var p = FolderForm.Rounded(new RectangleF(2 * s, 2 * s, Width - 4 * s, Height - 4 * s), Theme.Radius(16) * s))
-            {
-                if (Theme.Glass)
-                    using (var pen = new Pen(Theme.Ink18, 1.2f * s)) g.DrawPath(pen, p);   // glass: a soft outline
-                else
-                    using (var b = new SolidBrush(Theme.Ink07)) g.FillPath(b, p);
-            }
-        }
-        int iconSize = (int)(48 * s);
-        var iconRect = new Rectangle((Width - iconSize) / 2, (int)(12 * s), iconSize, iconSize);
-        if (DropTarget)
-        {
-            var ring = Rectangle.Inflate(iconRect, (int)(3 * s), (int)(3 * s));
-            using (var pen = new Pen(Theme.Accent, 2.5f * s))
-            using (var p = FolderForm.Rounded(ring, ring.Width * 0.24f))
-                g.DrawPath(pen, p);
-        }
-        if (Item == null)
-        {
-            // Prism's drop slot: dashed rounded square with a plus
-            var r = Rectangle.Inflate(iconRect, -(int)(2 * s), -(int)(2 * s));
-            using (var pen = new Pen(Hover ? Theme.Dim : Color.FromArgb(115, 128, 128, 128), 1.5f * s) { DashPattern = new[] { 3f, 2.5f } })
-            using (var p = FolderForm.Rounded(r, r.Width * 0.24f))
-                g.DrawPath(pen, p);
-            using (var pen = new Pen(Hover ? Theme.Fg : Theme.Dim, 1.6f * s) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-            {
-                float c = r.X + r.Width / 2f, m = r.Y + r.Height / 2f, k = r.Width * 0.18f;
-                g.DrawLine(pen, c - k, m, c + k, m);
-                g.DrawLine(pen, c, m - k, c, m + k);
-            }
-        }
-        else if (Item.Icon != null)
-        {
-            g.DrawImage(Item.Icon, iconRect);
-        }
-        else
-        {
-            using (var b = new SolidBrush(Theme.Ink08))
-            using (var p = FolderForm.Rounded(iconRect, iconSize * 0.22f))
-                g.FillPath(b, p);
-            TextRenderer.DrawText(g, "?", Font, iconRect, Theme.Dim,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-        }
+        if (Decor.On(this)) Decor.Request(this);
+        else { var l = new List<Deco>(); AddDecos(l, 0, 0); Decor.Paint(g, l); }
+        var iconRect = IconRect;
+        if (Item != null && Item.Icon != null) g.DrawImage(Item.Icon, iconRect);
+        else if (Item != null)
+            TextRenderer.DrawText(g, "?", Font, iconRect, Theme.Dim, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         string label = Item == null ? "Add" : Item.Label;
         var textRect = new Rectangle((int)(4 * s), iconRect.Bottom + (int)(6 * s), Width - (int)(8 * s), Height - iconRect.Bottom - (int)(8 * s));
         FolderForm.DrawLabel(g, label, Font, textRect, Item == null ? Theme.Dim : Theme.Fg2, true);
     }
 }
 
-class FolderForm : Form, IGlassHost
+class FolderForm : Form, IGlassHost, IDecoHost
 {
+    // ---- control shapes in the glass layer (see Deco) ----
+    public bool DecosOn { get { return !Decor.Disabled && BackdropAlive && backdrop.Rounded; } }
+    public RectangleF DecoClip { get { return grid.Bounds; } }
+    bool decosPending;
+
+    public void RequestDecos()
+    {
+        if (decosPending || !IsHandleCreated || IsDisposed) return;
+        decosPending = true;
+        BeginInvoke((Action)(() => { decosPending = false; if (DecosOn) backdrop.UpdateDecos(); }));
+    }
+
+    public void CollectDecos(List<Deco> list)
+    {
+        closeBtn.AddDecos(list, closeBtn.Left, closeBtn.Top);
+        gearBtn.AddDecos(list, gearBtn.Left, gearBtn.Top);
+        foreach (Control c in grid.Controls)
+        {
+            var t = c as Tile;
+            if (t != null && t.Visible) t.AddDecos(list, grid.Left + t.Left, grid.Top + t.Top);
+        }
+    }
+
     public static float S = 1f;   // DPI scale
     const int Cols = 4, MaxRows = 4;
 
@@ -600,6 +675,8 @@ class FolderForm : Form, IGlassHost
         grid.BackColor = BackColor;
         grid.AllowDrop = true;
         grid.AutoScroll = true;
+        grid.Scroll += (s, e) => RequestDecos();
+        grid.MouseWheel += (s, e) => RequestDecos();
         Controls.Add(grid);
 
         foreach (Control c in new Control[] { this, grid })
@@ -632,6 +709,8 @@ class FolderForm : Form, IGlassHost
                 int noRound = 1, none = unchecked((int)0xFFFFFFFE);
                 try { Native.DwmSetWindowAttribute(Handle, 33, ref noRound, 4); Native.DwmSetWindowAttribute(Handle, 34, ref none, 4); } catch { }
             }
+            Invalidate(true);   // controls now leave their shapes to the glass layer
+            RequestDecos();
         }
     }
 
@@ -938,6 +1017,7 @@ class FolderForm : Form, IGlassHost
         titleRect = new Rectangle(titleBox.Left, Px(16), titleBox.Width, btn);
         ClientSize = new Size(grid.Right + pad, grid.Bottom + pad);
         Invalidate();
+        RequestDecos();
         Icon = MakeFormIcon();
     }
 
@@ -1166,6 +1246,8 @@ class FolderForm : Form, IGlassHost
     }
 
     // The gear: Prysm's settings card, just below it, right-aligned with it.
+    public void TestShowSettings() { ShowSettings(); }   // for the edge self-test
+
     // The gear toggles: click it again while the card is open and the card closes.
     // (Pressing the gear already takes focus from the card, which starts it closing, so a card
     // that began closing a moment ago counts as "was open" too.)
@@ -1783,6 +1865,30 @@ class FolderForm : Form, IGlassHost
     }
 
     // ---------- helpers ----------
+    // Text on a coloured shape (e.g. black on a blue pill), centred in r. A patch of exactly that
+    // colour goes behind the letters first, so their smooth edges blend into the colour rather than
+    // into the see-through window's invisible background (which made them look jagged and heavy).
+    // The patch matches the shape behind it, so it can't be seen.
+    public static void TextOnColor(Graphics g, string text, Font font, Rectangle r, Color textColor, Color bg)
+    {
+        var old = g.TextRenderingHint;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+        using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+        {
+            var size = g.MeasureString(text, font, r.Width, sf);
+            float pad = 3 * S, h = Math.Min(r.Height - 4 * S, size.Height + 2 * pad), w = Math.Min(r.Width - r.Height, size.Width + 2 * pad);
+            // whole pixels, no smoothing: a soft patch edge would blend into the invisible background too
+            var patch = Rectangle.Round(new RectangleF(r.X + (r.Width - w) / 2f, r.Y + (r.Height - h) / 2f, w, h));
+            var oldMode = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.None;
+            g.PixelOffsetMode = PixelOffsetMode.None;
+            using (var b = new SolidBrush(bg)) g.FillRectangle(b, patch);
+            g.SmoothingMode = oldMode;
+            using (var b = new SolidBrush(textColor)) g.DrawString(text, font, b, r, sf);
+        }
+        g.TextRenderingHint = old;
+    }
+
     // Text that also looks right on glass: grayscale anti-aliasing (ClearType's coloured edges show
     // up as halos against the see-through background).
     public static void DrawLabel(Graphics g, string text, Font font, Rectangle r, Color color, bool center)
@@ -1874,7 +1980,7 @@ class InteractionFilter : IMessageFilter
 
 // The gear's settings, as a small Prism card (same glass, corners, type and accent as the
 // folder): a Windows 11 toggle for open-on-hover and a two-way switch for the look.
-class SettingsCard : Form, IGlassHost, IFolderChild
+class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
 {
     readonly FolderForm folder;
     readonly Action<bool> setLook;
@@ -2044,65 +2150,84 @@ class SettingsCard : Form, IGlassHost, IFolderChild
         int pad = Px(14);
         FolderForm.DrawLabel(g, "Settings", titleFont, new Rectangle(pad, Px(10), Width - 2 * pad, Px(28)), Theme.Fg, false);
 
+        // the shapes (row highlight, toggle, pill tracks, selected pills) are drawn smoothly in the
+        // glass layer; without it they're painted here
+        if (DecosOn) RequestDecos();
+        else { var l = new List<Deco>(); CollectDecos(l); Decor.Paint(g, l); }
+
         // Row: Open by hovering  [toggle]
-        if (hot == 0) FillOrOutline(g, hoverRow, Px(10), Theme.Ink07);
         FolderForm.DrawLabel(g, "Open by hovering", font, new Rectangle(pad, hoverRow.Y + Px(5), toggleRect.Left - pad - Px(8), Px(20)), Theme.Fg, false);
         FolderForm.DrawLabel(g, "Point at a folder to open it", small, new Rectangle(pad, hoverRow.Y + Px(24), toggleRect.Left - pad - Px(8), Px(18)), Theme.Dim, false);
-        DrawToggle(g, toggleRect, Settings.HoverOpen && Installer.IsInstalled);
 
         // Look:  [ See-through | Solid ]
         FolderForm.DrawLabel(g, "Look", small, new Rectangle(pad, Px(104), Width - 2 * pad, Px(20)), Theme.Dim, false);
-        var track = Rectangle.Union(segGlass, segSolid);
-        using (var p = FolderForm.Rounded(track, track.Height / 2f))
-        {
-            if (Theme.Glass) using (var pen = new Pen(Theme.Ink18, 1.2f * FolderForm.S)) g.DrawPath(pen, p);
-            else using (var b = new SolidBrush(Theme.Ink08)) g.FillPath(b, p);
-        }
-        DrawSegment(g, segGlass, "See-through", Theme.Glass, hot == 1);
-        DrawSegment(g, segSolid, "Solid", !Theme.Glass, hot == 2);
+        SegmentText(g, segGlass, "See-through", Theme.Glass);
+        SegmentText(g, segSolid, "Solid", !Theme.Glass);
 
         // Desktop icon:  [ 2 × 2 | 3 × 3 ]   (3 × 3 kicks in once a folder has more than 4 apps)
         FolderForm.DrawLabel(g, "Desktop icon, with more than 4 apps", small, new Rectangle(pad, Px(184), Width - 2 * pad, Px(20)), Theme.Dim, false);
-        var track2 = Rectangle.Union(seg2, seg3);
-        using (var p = FolderForm.Rounded(track2, track2.Height / 2f))
-        {
-            if (Theme.Glass) using (var pen = new Pen(Theme.Ink18, 1.2f * FolderForm.S)) g.DrawPath(pen, p);
-            else using (var b = new SolidBrush(Theme.Ink08)) g.FillPath(b, p);
-        }
-        DrawSegment(g, seg2, "2 × 2", !Theme.Grid3, hot == 3);
-        DrawSegment(g, seg3, "3 × 3", Theme.Grid3, hot == 4);
+        SegmentText(g, seg2, "2 × 2", !Theme.Grid3);
+        SegmentText(g, seg3, "3 × 3", Theme.Grid3);
 
         // Corners:  [ Rounded | Sharper ]
         FolderForm.DrawLabel(g, "Corners", small, new Rectangle(pad, Px(264), Width - 2 * pad, Px(20)), Theme.Dim, false);
-        var track3 = Rectangle.Union(segRound, segSharp);
-        using (var p = FolderForm.Rounded(track3, track3.Height / 2f))
-        {
-            if (Theme.Glass) using (var pen = new Pen(Theme.Ink18, 1.2f * FolderForm.S)) g.DrawPath(pen, p);
-            else using (var b = new SolidBrush(Theme.Ink08)) g.FillPath(b, p);
-        }
-        DrawSegment(g, segRound, "Rounded", !Theme.Sharp, hot == 5);
-        DrawSegment(g, segSharp, "Sharper", Theme.Sharp, hot == 6);
+        SegmentText(g, segRound, "Rounded", !Theme.Sharp);
+        SegmentText(g, segSharp, "Sharper", Theme.Sharp);
     }
 
-    void FillOrOutline(Graphics g, Rectangle r, float rad, Color c)
+    // ---- shapes (see Deco) ----
+    public bool DecosOn { get { return !Decor.Disabled && glass != null && !glass.IsDisposed && glass.Rounded; } }
+    public RectangleF DecoClip { get { return RectangleF.Empty; } }
+    bool decosPending;
+    public void RequestDecos()
     {
-        using (var p = FolderForm.Rounded(r, rad))
+        if (decosPending || !IsHandleCreated || IsDisposed) return;
+        decosPending = true;
+        BeginInvoke((Action)(() => { decosPending = false; if (DecosOn) glass.UpdateDecos(); }));
+    }
+
+    public void CollectDecos(List<Deco> list)
+    {
+        float s = FolderForm.S;
+        if (hot == 0) list.Add(Soft(hoverRow, Px(10), Theme.Ink07));
+        // Windows 11 toggle switch, in Prism's accent
+        bool on = Settings.HoverOpen && Installer.IsInstalled;
+        var t = toggleRect;
+        list.Add(on ? Deco.Box(t, t.Height / 2f, Theme.Accent) : Deco.Outline(t, t.Height / 2f, Theme.Dim, 1.2f * s));
+        float k = on ? t.Height - 8 * s : t.Height - 10 * s;
+        float cx = on ? t.Right - t.Height / 2f : t.X + t.Height / 2f, cy = t.Y + t.Height / 2f;
+        list.Add(Deco.Circle(new RectangleF(cx - k / 2, cy - k / 2, k, k), on ? Color.Black : Theme.Dim, Color.Empty, 0));
+        // the three two-way switches
+        Segments(list, segGlass, segSolid, Theme.Glass, 1);
+        Segments(list, seg2, seg3, !Theme.Grid3, 3);
+        Segments(list, segRound, segSharp, !Theme.Sharp, 5);
+    }
+
+    // the track, the selected pill (Prism blue) and the hovered one
+    void Segments(List<Deco> list, Rectangle a, Rectangle b, bool firstSelected, int firstHot)
+    {
+        var track = Rectangle.Union(a, b);
+        list.Add(Theme.Glass ? Deco.Outline(track, track.Height / 2f, Theme.Ink18, 1.2f * FolderForm.S) : Deco.Box(track, track.Height / 2f, Theme.Ink08));
+        for (int i = 0; i < 2; i++)
         {
-            if (Theme.Glass) using (var pen = new Pen(Theme.Ink18, 1.2f * FolderForm.S)) g.DrawPath(pen, p);
-            else using (var b = new SolidBrush(c)) g.FillPath(b, p);
+            var inner = Rectangle.Inflate(i == 0 ? a : b, -Px(3), -Px(3));
+            bool selected = (i == 0) == firstSelected;
+            if (selected) list.Add(Deco.Box(inner, inner.Height / 2f, Theme.Accent));
+            else if (hot == firstHot + i) list.Add(Soft(inner, inner.Height / 2f, Theme.Ink12));
         }
     }
 
-    void DrawSegment(Graphics g, Rectangle r, string text, bool selected, bool hover)
+    // a soft highlight: filled on Solid, an outline on glass (a fill would look like a sticker)
+    static Deco Soft(Rectangle r, float rad, Color fill)
+    {
+        return Theme.Glass ? Deco.Outline(r, rad, Theme.Ink18, 1.2f * FolderForm.S) : Deco.Box(r, rad, fill);
+    }
+
+    void SegmentText(Graphics g, Rectangle r, string text, bool selected)
     {
         var inner = Rectangle.Inflate(r, -Px(3), -Px(3));
-        if (selected)
-            using (var p = FolderForm.Rounded(inner, inner.Height / 2f))
-            using (var b = new SolidBrush(Theme.Accent)) g.FillPath(b, p);
-        else if (hover)
-            FillOrOutline(g, inner, inner.Height / 2f, Theme.Ink12);
-        var tr = new Rectangle(inner.X, inner.Y, inner.Width, inner.Height);
-        TextAt(g, text, font, tr, selected ? Color.Black : Theme.Fg2);
+        if (selected) FolderForm.TextOnColor(g, text, font, inner, Color.Black, Theme.Accent);
+        else TextAt(g, text, font, inner, Theme.Fg2);
     }
 
     static void TextAt(Graphics g, string text, Font f, Rectangle r, Color c)
@@ -2115,24 +2240,11 @@ class SettingsCard : Form, IGlassHost, IFolderChild
         g.TextRenderingHint = old;
     }
 
-    // Windows 11 toggle switch, in Prism's accent
-    void DrawToggle(Graphics g, Rectangle r, bool on)
-    {
-        float s = FolderForm.S;
-        using (var p = FolderForm.Rounded(r, r.Height / 2f))
-        {
-            if (on) using (var b = new SolidBrush(Theme.Accent)) g.FillPath(b, p);
-            else using (var pen = new Pen(Theme.Dim, 1.2f * s)) g.DrawPath(pen, p);
-        }
-        float k = on ? r.Height - 8 * s : r.Height - 10 * s;
-        float cx = on ? r.Right - r.Height / 2f : r.X + r.Height / 2f, cy = r.Y + r.Height / 2f;
-        using (var b = new SolidBrush(on ? Color.Black : Theme.Dim)) g.FillEllipse(b, cx - k / 2, cy - k / 2, k, k);
-    }
 }
 
 // Base for Prysm's little popups (menus, the rename box): a borderless Prism card on the same
 // glass as the folder (or the solid panel), rounded corners, quick fade/shrink in and out.
-abstract class PrismPopup : Form, IGlassHost, IFolderChild
+abstract class PrismPopup : Form, IGlassHost, IFolderChild, IDecoHost
 {
     protected readonly FolderForm folder;
     protected GlassBackdrop glass;
@@ -2243,13 +2355,26 @@ abstract class PrismPopup : Form, IGlassHost, IFolderChild
     public void GlassDrop(DragEventArgs e) { }
 
     // a soft highlight: filled on the solid look, an outline on glass (a fill would look like a sticker)
-    protected static void Highlight(Graphics g, Rectangle r, float rad)
+    protected static Deco Highlight(Rectangle r, float rad)
     {
-        using (var p = FolderForm.Rounded(r, rad))
-        {
-            if (Theme.Glass) using (var pen = new Pen(Theme.Ink18, 1.2f * FolderForm.S)) g.DrawPath(pen, p);
-            else using (var b = new SolidBrush(Theme.Ink08)) g.FillPath(b, p);
-        }
+        return Theme.Glass ? Deco.Outline(r, rad, Theme.Ink18, 1.2f * FolderForm.S) : Deco.Box(r, rad, Theme.Ink08);
+    }
+
+    // ---- shapes (see Deco): drawn smoothly in the glass layer, or painted here without it ----
+    public bool DecosOn { get { return !Decor.Disabled && glass != null && !glass.IsDisposed && glass.Rounded; } }
+    public RectangleF DecoClip { get { return RectangleF.Empty; } }
+    public virtual void CollectDecos(List<Deco> list) { }
+    bool decosPending;
+    public void RequestDecos()
+    {
+        if (decosPending || !IsHandleCreated || IsDisposed) return;
+        decosPending = true;
+        BeginInvoke((Action)(() => { decosPending = false; if (DecosOn) glass.UpdateDecos(); }));
+    }
+    protected void PaintDecos(Graphics g)
+    {
+        if (DecosOn) RequestDecos();
+        else { var l = new List<Deco>(); CollectDecos(l); Decor.Paint(g, l); }
     }
 }
 
@@ -2327,16 +2452,11 @@ class PrismMenu : PrismPopup
         g.Clear(Theme.Bg);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         if (iconFont == null) iconFont = Theme.IconFont(10.5f);
+        PaintDecos(g);
         for (int i = 0; i < entries.Count; i++)
         {
             var en = entries[i];
-            if (en.Separator)
-            {
-                int y = en.Bounds.Y + en.Bounds.Height / 2;
-                using (var pen = new Pen(Theme.Ink18, 1f)) g.DrawLine(pen, en.Bounds.X + Px(10), y, en.Bounds.Right - Px(10), y);
-                continue;
-            }
-            if (i == hot) Highlight(g, en.Bounds, Px(Theme.Radius(8)));
+            if (en.Separator) continue;
             Color c = en.Danger ? Color.FromArgb(0xff, 0x6b, 0x6b) : (i == hot ? Theme.Fg : Theme.Fg2);
             var gr = new Rectangle(en.Bounds.X + Px(8), en.Bounds.Y, Px(24), en.Bounds.Height);
             var old = g.TextRenderingHint;
@@ -2347,6 +2467,21 @@ class PrismMenu : PrismPopup
             g.TextRenderingHint = old;
             var tr = new Rectangle(gr.Right + Px(8), en.Bounds.Y, en.Bounds.Right - gr.Right - Px(12), en.Bounds.Height);
             FolderForm.DrawLabel(g, en.Text, Font, tr, c, false);
+        }
+    }
+
+    // the hovered row's highlight and the dividers
+    public override void CollectDecos(List<Deco> list)
+    {
+        for (int i = 0; i < entries.Count; i++)
+        {
+            var en = entries[i];
+            if (en.Separator)
+            {
+                float y = en.Bounds.Y + en.Bounds.Height / 2f;
+                list.Add(Deco.Ln(en.Bounds.X + Px(10), y, en.Bounds.Right - Px(10), y, Theme.Ink18, 1f));
+            }
+            else if (i == hot) list.Add(Highlight(en.Bounds, Px(Theme.Radius(8))));
         }
     }
 }
@@ -2378,6 +2513,8 @@ class PromptCard : PrismPopup
         int bw = Px(92), bh = Px(32), by = ClientSize.Height - pad - bh;
         okR = new Rectangle(ClientSize.Width - pad - bw, by, bw, bh);
         cancelR = new Rectangle(okR.X - Px(8) - bw, by, bw, bh);
+        box.GotFocus += (s, e) => Invalidate();
+        box.LostFocus += (s, e) => Invalidate();
         box.KeyDown += (s, e) =>
         {
             if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; Finish(true); }
@@ -2406,22 +2543,30 @@ class PromptCard : PrismPopup
         int pad = Px(16);
         FolderForm.DrawLabel(g, caption, titleFont, new Rectangle(pad, Px(12), Width - 2 * pad, Px(28)), Theme.Fg, false);
         FolderForm.DrawLabel(g, label, small, new Rectangle(pad, Px(42), Width - 2 * pad, Px(20)), Theme.Dim, false);
-        using (var p = FolderForm.Rounded(field, Px(9)))
-        {
-            using (var b = new SolidBrush(Theme.Ink08)) g.FillPath(b, p);
-            using (var pen = new Pen(box.Focused ? Theme.Accent : Theme.Ink18, 1.2f * FolderForm.S)) g.DrawPath(pen, p);
-        }
+        PaintDecos(g);
         Pill(g, cancelR, "Cancel", false, hot == 1);
         Pill(g, okR, "OK", true, hot == 0);
     }
 
+    // the text field and the two pill buttons
+    public override void CollectDecos(List<Deco> list)
+    {
+        float s = FolderForm.S;
+        var f = Deco.Box(field, Px(9), Theme.Ink08);
+        f.Stroke = box.Focused ? Theme.Accent : Theme.Ink18;
+        f.StrokeW = 1.2f * s;
+        list.Add(f);
+        list.Add(Deco.Box(okR, okR.Height / 2f, hot == 0 ? ControlPaint.Light(Theme.Accent, .25f) : Theme.Accent));
+        list.Add(Theme.Glass ? Deco.Outline(cancelR, cancelR.Height / 2f, hot == 1 ? Theme.Dim : Theme.Ink18, 1.2f * s)
+                             : Deco.Box(cancelR, cancelR.Height / 2f, hot == 1 ? Theme.Ink12 : Theme.Ink08));
+    }
+
     void Pill(Graphics g, Rectangle r, string text, bool primary, bool hover)
     {
-        using (var p = FolderForm.Rounded(r, r.Height / 2f))
+        if (primary)   // black on the blue OK pill: blended into the blue, not the see-through background
         {
-            if (primary) using (var b = new SolidBrush(hover ? ControlPaint.Light(Theme.Accent, .25f) : Theme.Accent)) g.FillPath(b, p);
-            else if (Theme.Glass) using (var pen = new Pen(hover ? Theme.Dim : Theme.Ink18, 1.2f * FolderForm.S)) g.DrawPath(pen, p);
-            else using (var b = new SolidBrush(hover ? Theme.Ink12 : Theme.Ink08)) g.FillPath(b, p);
+            FolderForm.TextOnColor(g, text, Font, r, Color.Black, hover ? ControlPaint.Light(Theme.Accent, .25f) : Theme.Accent);
+            return;
         }
         var old = g.TextRenderingHint;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
@@ -2598,6 +2743,82 @@ class GlassBackdrop : Form
     // Gets Windows' compositor ready ahead of time, so the first folder opens just as fast.
     public static void Warm() { UseComposition(); }
 
+    // The host's control shapes (pills, rings, highlights...), drawn smoothly on top of the card.
+    Windows.UI.Composition.ShapeVisual decoVisual, decoClipped;
+
+    public void UpdateDecos()
+    {
+        var host = Host as IDecoHost;
+        if (root == null || host == null || IsDisposed) return;
+        try
+        {
+            var c = compositor;
+            if (decoVisual == null)
+            {
+                decoClipped = c.CreateShapeVisual();
+                decoVisual = c.CreateShapeVisual();
+                root.Children.InsertAtTop(decoClipped);
+                root.Children.InsertAtTop(decoVisual);
+                sized.Add(decoClipped);
+                sized.Add(decoVisual);
+                decoClipped.Size = decoVisual.Size = root.Size;
+            }
+            var list = new List<Deco>();
+            host.CollectDecos(list);
+            decoVisual.Shapes.Clear();
+            decoClipped.Shapes.Clear();
+            var clip = host.DecoClip;
+            if (!clip.IsEmpty)
+                decoClipped.Clip = c.CreateInsetClip(clip.Left, clip.Top, Math.Max(0, Width - clip.Right), Math.Max(0, Height - clip.Bottom));
+            foreach (var d in list)
+            {
+                var shape = MakeShape(c, d);
+                if (shape != null) (d.ClipToGrid ? decoClipped : decoVisual).Shapes.Add(shape);
+            }
+        }
+        catch (Exception ex) { HoverWatcher.Log("control shapes: " + ex.Message); }
+    }
+
+    static System.Numerics.Vector2 V(float x, float y) { return new System.Numerics.Vector2(x, y); }
+
+    Windows.UI.Composition.CompositionSpriteShape MakeShape(Windows.UI.Composition.Compositor c, Deco d)
+    {
+        Windows.UI.Composition.CompositionGeometry geo;
+        if (d.Line)
+        {
+            var lg = c.CreateLineGeometry();
+            lg.Start = V(d.A.X, d.A.Y);
+            lg.End = V(d.B.X, d.B.Y);
+            geo = lg;
+        }
+        else if (d.Ellipse)
+        {
+            var eg = c.CreateEllipseGeometry();
+            eg.Center = V(d.R.X + d.R.Width / 2, d.R.Y + d.R.Height / 2);
+            eg.Radius = V(d.R.Width / 2, d.R.Height / 2);
+            geo = eg;
+        }
+        else
+        {
+            var rg = c.CreateRoundedRectangleGeometry();
+            rg.Offset = V(d.R.X, d.R.Y);
+            rg.Size = V(d.R.Width, d.R.Height);
+            float r = Math.Min(d.Radius, Math.Min(d.R.Width, d.R.Height) / 2);
+            rg.CornerRadius = V(r, r);
+            geo = rg;
+        }
+        var s = c.CreateSpriteShape(geo);
+        if (!d.Fill.IsEmpty) s.FillBrush = c.CreateColorBrush(C(d.Fill, d.Fill.A / 255.0));
+        if (!d.Stroke.IsEmpty)
+        {
+            s.StrokeBrush = c.CreateColorBrush(C(d.Stroke, d.Stroke.A / 255.0));
+            s.StrokeThickness = d.StrokeW;
+            if (d.Line) { s.StrokeStartCap = Windows.UI.Composition.CompositionStrokeCap.Round; s.StrokeEndCap = Windows.UI.Composition.CompositionStrokeCap.Round; }
+            if (d.Dashed) { s.StrokeDashArray.Add(3f); s.StrokeDashArray.Add(2.5f); }
+        }
+        return s;
+    }
+
     // Prism's "settle": the glass grows out from slightly smaller with a small spring, fading in.
     // Runs in Windows' compositor, so it's smooth even while the app is busy.
     public void AnimateIn()
@@ -2711,21 +2932,25 @@ class GlassBackdrop : Form
             root = c.CreateContainerVisual();
             target.Root = root;
 
+            // Every layer is a vector shape (or masked by one), so its rounded corners are drawn
+            // smoothly. (Clips - both the geometric clip and RectangleClip - leave jagged corners.)
             if (!Theme.Glass)
             {
                 // Solid look: the opaque Prism panel and its hairline rim. Drawn here too (rather
                 // than relying on Windows' fixed 8px window corners) so both looks get the same
                 // smooth corners, Rounded or Sharper.
-                AddFill(c.CreateColorBrush(C(Theme.Panel, 1)));
+                AddShapes(c);
+                AddShapeFill(c.CreateColorBrush(C(Theme.Panel, 1)));
                 AddRim(c, Theme.Light ? C(Color.Black, .12) : C(Color.White, .13), 0.5f);
                 LayoutGlass();
                 return true;
             }
-            // 1. the blurred backdrop
-            AddFill(c.CreateHostBackdropBrush());
+            // 1. the blurred backdrop, cut out by a smooth rounded mask
+            if (!AddMaskedBackdrop(c)) AddFill(c.CreateHostBackdropBrush());
+            AddShapes(c);
             // 2. Prism's panel tint (Liquid Glass: the panel thinned right down over the blur)
             Color panel = Theme.Light ? Color.FromArgb(0xf3, 0xf3, 0xf5) : Color.FromArgb(0x14, 0x14, 0x16);
-            AddFill(c.CreateColorBrush(C(panel, Theme.Light ? 0.45 : 0.34)));
+            AddShapeFill(c.CreateColorBrush(C(panel, Theme.Light ? 0.45 : 0.34)));
             // 3. the sheen: a breath of white, brighter at the top (Prism's linear-gradient)
             var sheen = c.CreateLinearGradientBrush();
             sheen.MappingMode = Windows.UI.Composition.CompositionMappingMode.Relative;
@@ -2735,7 +2960,7 @@ class GlassBackdrop : Form
             sheen.ColorStops.Add(c.CreateColorGradientStop(0f, C(Color.White, a0)));
             sheen.ColorStops.Add(c.CreateColorGradientStop(.6f, C(Color.White, a1)));
             sheen.ColorStops.Add(c.CreateColorGradientStop(1f, C(Color.White, a2)));
-            AddFill(sheen);
+            AddShapeFill(sheen);
             // 4. the rim: one clean hairline all round (Prism's inset 1px rim)
             AddRim(c, C(Color.White, Theme.Light ? .60 : .15), 0.5f);
             LayoutGlass();
@@ -2770,17 +2995,79 @@ class GlassBackdrop : Form
         sized.Add(sprite);
     }
 
+    public bool Masked { get { return maskSurface != null; } }   // the blur has the smooth mask (self-test)
+
+    // One shape layer holds the tint, sheen and rim (or the solid panel and rim).
+    Windows.UI.Composition.ShapeVisual shapes;
+    Windows.UI.Composition.CompositionVisualSurface maskSurface;
+
+    void AddShapes(Windows.UI.Composition.Compositor c)
+    {
+        shapes = c.CreateShapeVisual();
+        root.Children.InsertAtTop(shapes);
+        sized.Add(shapes);
+    }
+
+    // a smooth rounded shape filling the card, painted with brush
+    void AddShapeFill(Windows.UI.Composition.CompositionBrush brush)
+    {
+        var g = compositor.CreateRoundedRectangleGeometry();
+        geoms.Add(g);
+        var s = compositor.CreateSpriteShape(g);
+        s.FillBrush = brush;
+        shapes.Shapes.Add(s);
+    }
+
+    // The blur can't be a shape's paint, so it's masked instead: a white rounded shape is drawn
+    // into a surface, and only where that shape is (with its soft, anti-aliased edge) the blur shows.
+    bool AddMaskedBackdrop(Windows.UI.Composition.Compositor c)
+    {
+        try
+        {
+            var maskVisual = c.CreateShapeVisual();
+            var g = c.CreateRoundedRectangleGeometry();
+            geoms.Add(g);
+            var s = c.CreateSpriteShape(g);
+            s.FillBrush = c.CreateColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255));
+            maskVisual.Shapes.Add(s);
+            sized.Add(maskVisual);
+            maskSurface = c.CreateVisualSurface();
+            maskSurface.SourceVisual = maskVisual;
+            var maskBrush = c.CreateSurfaceBrush(maskSurface);
+            maskBrush.Stretch = Windows.UI.Composition.CompositionStretch.None;
+            var mb = c.CreateMaskBrush();
+            mb.Source = c.CreateHostBackdropBrush();
+            mb.Mask = maskBrush;
+            var sprite = c.CreateSpriteVisual();
+            sprite.Brush = mb;
+            root.Children.InsertAtTop(sprite);
+            sized.Add(sprite);
+            return true;
+        }
+        catch (Exception ex) { HoverWatcher.Log("smooth glass mask unavailable: " + ex.GetType().Name + ": " + ex.Message); maskSurface = null; return false; }
+    }
+
     void AddRim(Windows.UI.Composition.Compositor c, Windows.UI.Color color, float inset)
     {
-        var shapes = c.CreateShapeVisual();
         var g = c.CreateRoundedRectangleGeometry();
         g.Offset = new System.Numerics.Vector2(inset, inset);
+        if (Theme.Glass)
+        {
+            // a soft line (under the rim) where the blur's unsmoothable edge sits, blending it away
+            var g2 = c.CreateRoundedRectangleGeometry();
+            g2.Offset = new System.Numerics.Vector2(1.5f, 1.5f);
+            var s2 = c.CreateSpriteShape(g2);
+            Color panel = Theme.Light ? Color.FromArgb(0xf3, 0xf3, 0xf5) : Color.FromArgb(0x14, 0x14, 0x16);
+            s2.StrokeBrush = c.CreateColorBrush(C(panel, Theme.Light ? .55 : .45));
+            s2.StrokeThickness = 1.5f;
+            shapes.Shapes.Add(s2);
+            geoms.Add(g2);
+            rimInsets[g2] = 1.5f;
+        }
         var shape = c.CreateSpriteShape(g);
         shape.StrokeBrush = c.CreateColorBrush(color);
         shape.StrokeThickness = 1f;
         shapes.Shapes.Add(shape);
-        root.Children.InsertAtTop(shapes);
-        sized.Add(shapes);
         geoms.Add(g);
         rimInsets[g] = inset;
     }
@@ -2793,10 +3080,13 @@ class GlassBackdrop : Form
         var size = new System.Numerics.Vector2(w, h);
         root.Size = size;
         foreach (var v in sized) v.Size = size;
-        var rr = new System.Numerics.Vector2(r, r);
+        // The blur's clip can't be smooth, so its edge is tucked just inside the card and hidden under
+        // the smooth rim; the card's outline itself comes from the smooth shapes on top.
+        float ins = 1.5f;
+        var rr = new System.Numerics.Vector2(r - ins, r - ins);
         foreach (var cl in clips)
         {
-            cl.Left = 0; cl.Top = 0; cl.Right = w; cl.Bottom = h;
+            cl.Left = ins; cl.Top = ins; cl.Right = w - ins; cl.Bottom = h - ins;
             cl.TopLeftRadius = rr; cl.TopRightRadius = rr; cl.BottomRightRadius = rr; cl.BottomLeftRadius = rr;
         }
         foreach (var g in geoms)
@@ -2813,11 +3103,9 @@ class GlassBackdrop : Form
                 g.CornerRadius = new System.Numerics.Vector2(r, r);
             }
         }
-        // Clicks in the far corners (outside the rounded glass) go to whatever is behind. A window
-        // region is hard-edged, so it's kept a little squarer than the glass: it then sits just
-        // outside the glass's smooth, anti-aliased edge instead of cutting a jagged step into it.
-        int d = (int)Math.Round(2 * r * 0.55);
-        Region = System.Drawing.Region.FromHrgn(Native.CreateRoundRectRgn(0, 0, Width + 1, Height + 1, d, d));
+        if (maskSurface != null) maskSurface.SourceSize = size;
+        // No window region: a region is hard-edged (it could only ever make corners rougher).
+        // The few pixels just outside each rounded corner count as part of the folder for clicks.
     }
 
     protected override void OnSizeChanged(EventArgs e) { base.OnSizeChanged(e); LayoutGlass(); }
@@ -3435,6 +3723,7 @@ static class Promo
         tmp = Path.Combine(Path.GetTempPath(), "PrysmPromo");
         Directory.CreateDirectory(tmp);
         FolderForm.S = 2f; Theme.FontScale = 2f; Native.Jumbo = true; Theme.Grid3 = true; Theme.Sharp = false;
+        Decor.Disabled = true;   // the pictures are drawn without the glass layer: controls paint their own shapes
 
         string fav = MakeFolder("Favourites", new[] {
             @"C:\Windows\explorer.exe|File Explorer",
@@ -3870,6 +4159,103 @@ static class Program
             }
             return;
         }
+        if (arg == "--edgetest2" && args.Length > 1)
+        {
+            // Self-test: a real folder with its settings card over stripes; saves the card zoomed 4x
+            Theme.Load();
+            string dir = Path.Combine(Path.GetTempPath(), "PrysmEdge");
+            Directory.CreateDirectory(dir);
+            string file = Path.Combine(dir, "Edge" + Installer.Ext);
+            FolderForm.WriteFolderFile(file, FolderForm.RenderPreview(new List<Item>(), 256),
+                "title=Edge\r\nitem=C:\\Windows\\System32\\notepad.exe|Notepad\r\nitem=C:\\Windows\\System32\\calc.exe|Calculator\r\n");
+            var area = Screen.PrimaryScreen.WorkingArea;
+            var stripes = new Form { FormBorderStyle = FormBorderStyle.None, StartPosition = FormStartPosition.Manual,
+                                     Bounds = new Rectangle(area.Left + 20, area.Top + 20, 760, 560), ShowInTaskbar = false, TopMost = true };
+            stripes.Paint += (s, e) =>
+            {
+                for (int i = -600; i < 1400; i += 14)
+                    using (var p = new Pen(i % 28 == 0 ? Color.White : Color.FromArgb(30, 60, 200), 7)) e.Graphics.DrawLine(p, i, 0, i + 500, 600);
+            };
+            stripes.Show();
+            var f = new FolderForm("edge", file) { OpenAt = new Point(area.Left + 50, area.Top + 50) };
+            f.Show();
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 700) { Application.DoEvents(); Thread.Sleep(10); }
+            f.TestShowSettings();
+            sw.Restart();
+            while (sw.ElapsedMilliseconds < 900) { Application.DoEvents(); Thread.Sleep(10); }
+            Form card = null;
+            foreach (Form o in Application.OpenForms) if (o is SettingsCard) card = o;
+            var grab = card != null ? card.Bounds : f.Bounds;
+            using (var shot = new Bitmap(grab.Width, grab.Height))
+            {
+                using (var g = Graphics.FromImage(shot)) g.CopyFromScreen(grab.Location, Point.Empty, grab.Size);
+                using (var big = new Bitmap(grab.Width * 4, grab.Height * 4))
+                using (var g = Graphics.FromImage(big))
+                {
+                    g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                    g.PixelOffsetMode = PixelOffsetMode.Half;
+                    g.DrawImage(shot, 0, 0, big.Width, big.Height);
+                    big.Save(args[1], ImageFormat.Png);
+                }
+            }
+            var fr = f.Bounds;
+            using (var shot = new Bitmap(fr.Width, fr.Height))
+            {
+                using (var g = Graphics.FromImage(shot)) g.CopyFromScreen(fr.Location, Point.Empty, fr.Size);
+                shot.Save(args[1].Replace(".png", ".folder.png"), ImageFormat.Png);
+            }
+            if (card != null) card.Dispose();
+            f.Dispose();
+            stripes.Close();
+            try { File.Delete(file); } catch { }
+            return;
+        }
+        if (arg == "--edgetest" && args.Length > 1)
+        {
+            // Self-test: shows a glass card for a moment and saves its four corners, zoomed 8x
+            Theme.Load();
+            var area = Screen.PrimaryScreen.WorkingArea;
+            var rect = new Rectangle(area.Left + 40, area.Top + 40, 260, 160);
+            // a busy, high-contrast background right behind it (worst case for edges)
+            var stripes = new Form { FormBorderStyle = FormBorderStyle.None, StartPosition = FormStartPosition.Manual, Bounds = Rectangle.Inflate(rect, 30, 30), ShowInTaskbar = false, TopMost = true };
+            stripes.Paint += (s, e) =>
+            {
+                for (int i = -400; i < 800; i += 14)
+                    using (var p = new Pen(i % 28 == 0 ? Color.White : Color.FromArgb(30, 60, 200), 7)) e.Graphics.DrawLine(p, i, 0, i + 300, 400);
+            };
+            stripes.Show();
+            using (var host = new Form { FormBorderStyle = FormBorderStyle.None, StartPosition = FormStartPosition.Manual, Bounds = rect,
+                                         ShowInTaskbar = false, TopMost = true, BackColor = Theme.Key, TransparencyKey = Theme.Key })
+            {
+                host.Show();
+                var gb = new GlassBackdrop(host, 24) { Bounds = rect };
+                gb.Show();
+                host.BringToFront();
+                var sw = Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < 900) { Application.DoEvents(); Thread.Sleep(10); }
+                int c = 34, z = 8;
+                var grab = Rectangle.Inflate(rect, 6, 6);
+                using (var shot = new Bitmap(grab.Width, grab.Height))
+                {
+                    using (var g = Graphics.FromImage(shot)) g.CopyFromScreen(grab.Location, Point.Empty, grab.Size);
+                    using (var outBmp = new Bitmap(2 * c * z + 8, 2 * c * z + 8))
+                    using (var g = Graphics.FromImage(outBmp))
+                    {
+                        g.Clear(Color.Magenta);
+                        g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                        g.PixelOffsetMode = PixelOffsetMode.Half;
+                        var corners = new[] { new Point(0, 0), new Point(shot.Width - c, 0), new Point(0, shot.Height - c), new Point(shot.Width - c, shot.Height - c) };
+                        for (int i = 0; i < 4; i++)
+                            g.DrawImage(shot, new Rectangle((i % 2) * (c * z + 8), (i / 2) * (c * z + 8), c * z, c * z), new Rectangle(corners[i], new Size(c, c)), GraphicsUnit.Pixel);
+                        outBmp.Save(args[1], ImageFormat.Png);
+                    }
+                }
+                gb.Close(); host.Close();
+            }
+            stripes.Close();
+            return;
+        }
         if (arg == "--glasstest" && args.Length > 1)
         {
             // Self-test: can this PC do Prism's rounded glass, or only the plain-acrylic fallback?
@@ -3880,7 +4266,8 @@ static class Program
                 gb.Location = host.Location;
                 gb.Show();
                 Application.DoEvents();
-                File.WriteAllText(args[1], gb.Rounded ? "rounded host-backdrop glass: OK" : "fallback: plain acrylic");
+                File.WriteAllText(args[1], (gb.Rounded ? "rounded host-backdrop glass: OK" : "fallback: plain acrylic") +
+                                           (gb.Masked ? ", smooth mask: OK" : ", smooth mask: NOT available (clip fallback)"));
                 gb.Close(); host.Close();
             }
             return;
@@ -3979,6 +4366,7 @@ static class Program
     // Test helper: draws a folder window into a PNG without showing it on screen.
     static void Snapshot(string folderFile, string outPng)
     {
+        Decor.Disabled = true;
         using (var f = new FolderForm("snapshot", Path.GetFullPath(folderFile)))
         {
             f.ShowInTaskbar = false;

@@ -45,6 +45,8 @@ you click something else.
 - **Phone-style reordering.** Drag an app and the others slide out of the way.
 - **Follows your files.** Moved or renamed a folder or file that's in a Prysm Folder? It still opens.
 - **Closes the instant you click away**, with a quick fade.
+- **Updates itself.** When a new version comes out, a blue dot appears on the gear; one click in settings
+  downloads and installs it. No need to come back here.
 - **Tiny and self-contained.** One small `.exe` (about 160 KB), no frameworks to install, nothing sent anywhere.
 
 <div align="center">
@@ -86,7 +88,8 @@ desktop as files (they'll open again if you reinstall).
 | **Rename** | Click the folder's name at the top, or rename it on the desktop like any file. |
 | **App options** | Right-click an app: open, run as administrator, open file location, rename, move, remove. |
 | **Close** | Click anywhere else, press Esc, or click the **✕**. |
-| **Settings** | The gear next to the ✕: hover-to-open on/off, See-through or Solid, whether the desktop icon shows 2 × 2 or 3 × 3, and Rounded or Sharper corners. |
+| **Settings** | The gear next to the ✕: hover-to-open on/off, See-through or Solid, whether the desktop icon shows 2 × 2 or 3 × 3, Rounded or Sharper corners, and **Updates**. |
+| **Update** | Gear → **Updates** → **Check**, then **Update** when a new version is there. A blue dot on the gear means one is waiting. |
 
 <div align="center">
 <img src="docs/images/menus.png" alt="The right-click menu for an app and the settings card, both in the glass style" width="100%">
@@ -126,6 +129,12 @@ hover helper if it isn't running. A log is kept at `%TEMP%\PrysmFolder.log`.
 **A folder's icon on the desktop didn't update.**
 Windows sometimes holds on to old icons; pressing **F5** on the desktop (or signing out and in) refreshes them.
 
+**How do updates work?**
+About once a day Prysm Folder asks GitHub for this project's latest release. If it's newer, you'll see a short
+notice and a blue dot on the gear. Gear → **Updates** → **Update** downloads that release's `.exe` (only from this
+project's GitHub releases) and installs it over the old one; your folders and settings stay as they are. Nothing
+about you is sent: it only reads the public release list. You can also press **Check** any time.
+
 **Does it work on Windows 10?**
 Prysm Folder is made for, and tested on, Windows 11 only.
 
@@ -142,6 +151,13 @@ build.bat
 
 That produces `Prysm Folder.exe`. Run it to install, or use `"Prysm Folder.exe" --install` /
 `--uninstall` (add `--quiet` to skip the dialogs).
+
+### Shipping an update
+
+1. Raise the version in `Updater.Current` (in `PrysmFolder.cs`) and run `build.bat`.
+2. Publish a GitHub release tagged `vX.Y.Z` (matching that version) with `Prysm Folder.exe` attached.
+
+Everyone's Prysm Folder (1.3.0 and later) finds it within a day, or straight away with **Check**.
 
 ### How it works (for the curious)
 

@@ -9,7 +9,9 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -274,6 +276,211 @@ static class Settings
     public static bool IconGrid3 { get { return Get("IconGrid3", 1) != 0; } set { Set("IconGrid3", value ? 1 : 0); } }
     // Corners: big and round like Prism (false), or tighter (true). Both looks, and the Desktop icon.
     public static bool SharpCorners { get { return Get("SharpCorners", 0) != 0; } set { Set("SharpCorners", value ? 1 : 0); } }
+
+    static string GetS(string name)
+    {
+        try { using (var k = Registry.CurrentUser.OpenSubKey(Key)) return k == null ? "" : (k.GetValue(name, "") as string ?? ""); }
+        catch { return ""; }
+    }
+    static void SetS(string name, string v)
+    {
+        try { using (var k = Registry.CurrentUser.CreateSubKey(Key)) k.SetValue(name, v ?? ""); } catch { }
+    }
+
+    // what the last update check found (see Updater)
+    public static string LatestVersion { get { return GetS("LatestVersion"); } set { SetS("LatestVersion", value); } }
+    public static string LatestUrl { get { return GetS("LatestUrl"); } set { SetS("LatestUrl", value); } }
+    public static string LastUpdateCheck { get { return GetS("LastUpdateCheck"); } set { SetS("LastUpdateCheck", value); } }
+    public static string NotifiedVersion { get { return GetS("NotifiedVersion"); } set { SetS("NotifiedVersion", value); } }
+}
+
+// Updates: checks this app's GitHub releases and installs a newer one in place.
+// To push an update to everyone: publish a new release on GitHub (tag "vX.Y.Z") with the .exe
+// attached. Apps find it within a day (or straight away with Settings > Check), download it from
+// the release and run it as "--install --quiet --updated", which replaces the installed copy.
+// Only GitHub's public release list for this repo is read, and only this repo's release files
+// are downloaded; nothing about the user is sent.
+static class Updater
+{
+    public const string Repo = "Peteboii/Prysm-Folder";
+    public static readonly Version Current = new Version(1, 3, 0);
+    public static string CurrentText { get { return Current.ToString(3); } }
+
+    public class Release { public Version Version; public string ExeUrl; }
+
+    static void Tls() { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; }
+
+    // The newest release on GitHub (throws if it can't be reached or read).
+    public static Release FetchLatest()
+    {
+        Tls();
+        var req = (HttpWebRequest)WebRequest.Create("https://api.github.com/repos/" + Repo + "/releases/latest");
+        req.UserAgent = "PrysmFolder/" + CurrentText;   // GitHub requires one; no personal details
+        req.Accept = "application/vnd.github+json";
+        req.Timeout = 15000;
+        string json;
+        using (var resp = req.GetResponse())
+        using (var sr = new StreamReader(resp.GetResponseStream())) json = sr.ReadToEnd();
+        string tag = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"([^\"]+)\"").Groups[1].Value;
+        string exe = Regex.Match(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]+\\.exe)\"").Groups[1].Value;
+        Version v;
+        if (!Version.TryParse(tag.TrimStart('v', 'V'), out v)) throw new Exception("The latest release has an unexpected tag: " + tag);
+        if (exe.Length == 0) throw new Exception("The latest release has no .exe attached.");
+        return new Release { Version = v, ExeUrl = exe };
+    }
+
+    public static void Remember(Release r)
+    {
+        Settings.LatestVersion = r.Version.ToString(3);
+        Settings.LatestUrl = r.ExeUrl;
+        Settings.LastUpdateCheck = DateTime.UtcNow.ToString("o");
+    }
+
+    public static Version Latest { get { Version v; return Version.TryParse(Settings.LatestVersion, out v) ? v : null; } }
+    public static bool Available { get { var v = Latest; return v != null && v > Current && Settings.LatestUrl.Length > 0; } }
+
+    public static bool CheckedRecently(TimeSpan within)
+    {
+        DateTime t;
+        return DateTime.TryParse(Settings.LastUpdateCheck, null, System.Globalization.DateTimeStyles.RoundtripKind, out t) && DateTime.UtcNow - t < within;
+    }
+
+    // Downloads the update to %TEMP% (reporting 0-100). Only from this repo's own releases.
+    public static string Download(string url, Action<int> progress)
+    {
+        if (!url.StartsWith("https://github.com/" + Repo + "/releases/download/", StringComparison.OrdinalIgnoreCase))
+            throw new Exception("Refusing to download from an unexpected address.");
+        Tls();
+        string path = Path.Combine(Path.GetTempPath(), "PrysmFolder-update.exe");
+        var req = (HttpWebRequest)WebRequest.Create(url);
+        req.UserAgent = "PrysmFolder/" + CurrentText;
+        req.Timeout = 30000;
+        using (var resp = (HttpWebResponse)req.GetResponse())
+        using (var src = resp.GetResponseStream())
+        using (var dst = File.Create(path))
+        {
+            long total = resp.ContentLength, got = 0;
+            var buf = new byte[81920];
+            int n, last = -1;
+            while ((n = src.Read(buf, 0, buf.Length)) > 0)
+            {
+                dst.Write(buf, 0, n);
+                got += n;
+                int pct = total > 0 ? (int)(got * 100 / total) : 0;
+                if (pct != last && progress != null) { progress(pct); last = pct; }
+            }
+        }
+        var head = new byte[2];
+        using (var f = File.OpenRead(path)) f.Read(head, 0, 2);
+        if (new FileInfo(path).Length < 50 * 1024 || head[0] != 'M' || head[1] != 'Z')
+            throw new Exception("The download doesn't look like Prysm Folder.");
+        return path;
+    }
+
+    // Runs the downloaded version's installer; it replaces this copy and restarts the helper.
+    public static void Install(string exe)
+    {
+        Process.Start(new ProcessStartInfo(exe, "--install --quiet --updated") { UseShellExecute = false });
+    }
+
+    // Background check (the hover helper calls this): at most once a day; tells the user once per version.
+    public static void BackgroundCheck(Control ui)
+    {
+        if (CheckedRecently(TimeSpan.FromHours(20))) { NotifyOnce(ui); return; }
+        var t = new Thread(() =>
+        {
+            try { Remember(FetchLatest()); }
+            catch (Exception ex) { HoverWatcher.Log("update check failed: " + ex.Message); return; }
+            try { ui.BeginInvoke((Action)(() => NotifyOnce(ui))); } catch { }
+        }) { IsBackground = true };
+        t.Start();
+    }
+
+    static void NotifyOnce(Control ui)
+    {
+        if (!Available || Settings.NotifiedVersion == Settings.LatestVersion) return;
+        Settings.NotifiedVersion = Settings.LatestVersion;
+        Toast.Show("Prysm Folder " + Settings.LatestVersion + " is available", "Open any folder's settings (the gear) to update.");
+    }
+}
+
+// A small Prism-style notice in the bottom-right corner that fades away by itself.
+class Toast : Form
+{
+    readonly string title, body;
+    readonly Font titleFont = Theme.UiFont(10f, FontStyle.Regular, true), bodyFont = Theme.UiFont(9f);
+
+    public static void Show(string title, string body)
+    {
+        try { Theme.Load(); new Toast(title, body).Show(); } catch { }
+    }
+
+    // the same notice as the whole app (after an update installs: the process ends when it closes)
+    public class Done : Toast { public Done(string title, string body) : base(title, body) { } }
+
+    protected Toast(string title, string body)
+    {
+        this.title = title; this.body = body;
+        FormBorderStyle = FormBorderStyle.None;
+        StartPosition = FormStartPosition.Manual;
+        ShowInTaskbar = false;
+        TopMost = true;
+        BackColor = Theme.Panel;
+        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+        float S = FolderForm.S;
+        ClientSize = new Size((int)(340 * S), (int)(74 * S));
+        var wa = Screen.PrimaryScreen.WorkingArea;
+        Location = new Point(wa.Right - Width - (int)(16 * S), wa.Bottom - Height - (int)(16 * S));
+        Cursor = Cursors.Hand;
+        Click += (o, e) => Close();
+    }
+
+    protected override CreateParams CreateParams
+    {
+        get { var cp = base.CreateParams; cp.ExStyle |= 0x08000000 | 0x80; cp.ClassStyle |= 0x20000; return cp; }   // no focus, no taskbar, shadow
+    }
+    protected override bool ShowWithoutActivation { get { return true; } }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        int round = 2, rim = Theme.ToBgr(Theme.Rim), dark = Theme.Light ? 0 : 1;
+        try
+        {
+            Native.DwmSetWindowAttribute(Handle, 33, ref round, 4);
+            Native.DwmSetWindowAttribute(Handle, 34, ref rim, 4);
+            Native.DwmSetWindowAttribute(Handle, 20, ref dark, 4);
+        }
+        catch { }
+    }
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        Opacity = 0;
+        var clock = Stopwatch.StartNew();
+        var t = new System.Windows.Forms.Timer { Interval = 15 };
+        t.Tick += (o, a) =>
+        {
+            double ms = clock.Elapsed.TotalMilliseconds;
+            if (IsDisposed) { t.Dispose(); return; }
+            Opacity = ms < 200 ? ms / 200 : ms < 6000 ? 1 : Math.Max(0, 1 - (ms - 6000) / 400);
+            if (ms > 6400) { t.Dispose(); Close(); }
+        };
+        t.Start();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Theme.Panel);
+        float S = FolderForm.S;
+        using (var ic = Promo.AppIcon(64)) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.DrawImage(ic, 14 * S, 17 * S, 40 * S, 40 * S); }
+        var tr = new Rectangle((int)(66 * S), (int)(14 * S), Width - (int)(80 * S), (int)(24 * S));
+        TextRenderer.DrawText(g, title, titleFont, tr, Theme.Fg, TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        var br = new Rectangle((int)(66 * S), (int)(38 * S), Width - (int)(80 * S), (int)(24 * S));
+        TextRenderer.DrawText(g, body, bodyFont, br, Theme.Dim, TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+    }
 }
 
 // Prism's look (same palette as DG-Dock's launchpad): a #202022 panel, white "ink" tints and
@@ -456,6 +663,11 @@ class CloseButton : Control
             list.Add(Deco.Circle(new RectangleF(ox + 1, oy + 1, W - 3, H - 3), Color.Empty, hover ? Theme.Dim : Theme.Ink18, 1.2f * s));
         else
             list.Add(Deco.Circle(new RectangleF(ox, oy, W - 1, H - 1), hover ? Theme.Ink12 : Theme.Ink08, Color.Empty, 0));
+        if (Gear && Updater.Available)   // an update is waiting: a little Prism-blue dot on the gear
+        {
+            float d = 8 * s;
+            list.Add(Deco.Circle(new RectangleF(ox + W - d - 1 * s, oy + 1 * s, d, d), Theme.Accent, Color.Empty, 0));
+        }
         if (!Gear)
         {
             float c = W / 2f, r = W * 0.16f;
@@ -2007,8 +2219,14 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
     readonly FolderForm folder;
     readonly Action<bool> setLook;
     GlassBackdrop glass;
-    Rectangle hoverRow, toggleRect, segGlass, segSolid, seg2, seg3, segRound, segSharp;
-    int hot = -1;   // 0 hover row, 1 See-through, 2 Solid, 3 icon 2x2, 4 icon 3x3, 5 Rounded, 6 Sharper
+    Rectangle hoverRow, toggleRect, segGlass, segSolid, seg2, seg3, segRound, segSharp, updBtn;
+    int hot = -1;   // 0 hover row, 1 See-through, 2 Solid, 3 icon 2x2, 4 icon 3x3, 5 Rounded, 6 Sharper, 7 update button
+
+    // the Updates row: what it says and what its button does
+    enum Upd { Idle, Checking, UpToDate, Available, Downloading, Installing, Failed }
+    Upd upd = Updater.Available ? Upd.Available : Upd.Idle;
+    int updPct;
+    string updError = "";
     readonly Font titleFont = Theme.UiFont(11f, FontStyle.Regular, true);
     readonly Font font = Theme.UiFont(9.5f);
     readonly Font small = Theme.UiFont(8.5f);
@@ -2026,7 +2244,7 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
         BackColor = Theme.Bg;
         TransparencyKey = Theme.Key;
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
-        ClientSize = new Size(Px(292), Px(342));
+        ClientSize = new Size(Px(292), Px(410));
         int pad = Px(14);
         hoverRow = new Rectangle(pad - Px(6), Px(46), ClientSize.Width - 2 * pad + Px(12), Px(48));
         toggleRect = new Rectangle(ClientSize.Width - pad - Px(40), hoverRow.Y + (hoverRow.Height - Px(20)) / 2, Px(40), Px(20));
@@ -2039,6 +2257,8 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
         int cornerY = Px(290);
         segRound = new Rectangle(pad, cornerY, half, segH);
         segSharp = new Rectangle(pad + half, cornerY, ClientSize.Width - 2 * pad - half, segH);
+        int bw = Px(104);
+        updBtn = new Rectangle(ClientSize.Width - pad - bw, Px(358), bw, Px(32));
         Cursor = Cursors.Hand;
     }
 
@@ -2123,7 +2343,7 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
     {
         return hoverRow.Contains(p) ? 0 : segGlass.Contains(p) ? 1 : segSolid.Contains(p) ? 2
              : seg2.Contains(p) ? 3 : seg3.Contains(p) ? 4
-             : segRound.Contains(p) ? 5 : segSharp.Contains(p) ? 6 : -1;
+             : segRound.Contains(p) ? 5 : segSharp.Contains(p) ? 6 : updBtn.Contains(p) ? 7 : -1;
     }
 
     protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); SetHot(HitTest(e.Location)); }
@@ -2156,6 +2376,7 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
                 break;
             case 5: if (Theme.Sharp) { Close(); folder.SetCorners(false); } break;
             case 6: if (!Theme.Sharp) { Close(); folder.SetCorners(true); } break;
+            case 7: UpdateButton(); break;
         }
     }
 
@@ -2197,6 +2418,77 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
         FolderForm.DrawLabel(g, "Corners", small, new Rectangle(pad, Px(264), Width - 2 * pad, Px(20)), Theme.Dim, false);
         SegmentText(g, segRound, "Rounded", !Theme.Sharp);
         SegmentText(g, segSharp, "Sharper", Theme.Sharp);
+
+        // Updates:  Version 1.3.0 / status        [ Check | Update ]
+        FolderForm.DrawLabel(g, "Updates", small, new Rectangle(pad, Px(336), Width - 2 * pad, Px(20)), Theme.Dim, false);
+        FolderForm.DrawLabel(g, "Version " + Updater.CurrentText, font, new Rectangle(pad, updBtn.Y - Px(2), updBtn.Left - pad - Px(8), Px(20)), Theme.Fg, false);
+        FolderForm.DrawLabel(g, UpdateStatus(), small, new Rectangle(pad, updBtn.Y + Px(17), updBtn.Left - pad - Px(4), Px(18)),
+                             upd == Upd.Available ? Theme.Accent : upd == Upd.Failed ? Color.FromArgb(0xff, 0x8a, 0x8a) : Theme.Dim, false);
+        if (upd == Upd.Available) FolderForm.TextOnColor(g, UpdateButtonText(), font, updBtn, Color.Black, hot == 7 ? ControlPaint.Light(Theme.Accent, .25f) : Theme.Accent);
+        else TextAt(g, UpdateButtonText(), font, updBtn, Theme.Fg);
+    }
+
+    // ---- updates ----
+    void UpdateButton()
+    {
+        if (upd == Upd.Checking || upd == Upd.Downloading || upd == Upd.Installing) return;
+        if (upd == Upd.Available) { StartDownload(); return; }
+        upd = Upd.Checking; Invalidate();
+        RunInBackground(() =>
+        {
+            var r = Updater.FetchLatest();
+            Updater.Remember(r);
+            return Updater.Available ? Upd.Available : Upd.UpToDate;
+        });
+    }
+
+    void StartDownload()
+    {
+        upd = Upd.Downloading; updPct = 0; Invalidate();
+        string url = Settings.LatestUrl;
+        RunInBackground(() =>
+        {
+            string exe = Updater.Download(url, pct => { try { BeginInvoke((Action)(() => { updPct = pct; Invalidate(); })); } catch { } });
+            Updater.Install(exe);   // the new version replaces this one and restarts Prysm Folder
+            return Upd.Installing;
+        });
+    }
+
+    // network work off the UI thread; the row shows the outcome (or the error)
+    void RunInBackground(Func<Upd> work)
+    {
+        new Thread(() =>
+        {
+            Upd result; string err = "";
+            try { result = work(); }
+            catch (Exception ex) { result = Upd.Failed; err = ex.Message; HoverWatcher.Log("update: " + ex.Message); }
+            try { BeginInvoke((Action)(() => { upd = result; updError = err; Invalidate(); })); } catch { }
+        }) { IsBackground = true }.Start();
+    }
+
+    string UpdateStatus()
+    {
+        switch (upd)
+        {
+            case Upd.Checking: return "Checking for updates…";
+            case Upd.UpToDate: return "You're up to date";
+            case Upd.Available: return "Version " + Settings.LatestVersion + " is available";
+            case Upd.Downloading: return "Downloading… " + updPct + "%";
+            case Upd.Installing: return "Installing — Prysm Folder will restart";
+            case Upd.Failed: return "Couldn't check right now";
+            default: return "Updates come from GitHub";
+        }
+    }
+
+    string UpdateButtonText()
+    {
+        switch (upd)
+        {
+            case Upd.Available: return "Update";
+            case Upd.Checking: case Upd.Downloading: case Upd.Installing: return "…";
+            case Upd.Failed: return "Try again";
+            default: return "Check";
+        }
     }
 
     // ---- shapes (see Deco) ----
@@ -2225,6 +2517,11 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
         Segments(list, segGlass, segSolid, Theme.Glass, 1);
         Segments(list, seg2, seg3, !Theme.Grid3, 3);
         Segments(list, segRound, segSharp, !Theme.Sharp, 5);
+        // the update button: Prism blue when there's an update to install
+        var u = updBtn;
+        if (upd == Upd.Available) list.Add(Deco.Box(u, u.Height / 2f, hot == 7 ? ControlPaint.Light(Theme.Accent, .25f) : Theme.Accent));
+        else list.Add(Theme.Glass ? Deco.Outline(u, u.Height / 2f, hot == 7 ? Theme.Dim : Theme.Ink18, 1.2f * s)
+                                  : Deco.Box(u, u.Height / 2f, hot == 7 ? Theme.Ink12 : Theme.Ink08));
     }
 
     // the track, the selected pill (Prism blue) and the hovered one
@@ -3412,6 +3709,12 @@ static class HoverWatcher
             var warm = new System.Windows.Forms.Timer { Interval = 1500 };
             warm.Tick += (s, e) => { warm.Dispose(); WarmUp(); };
             warm.Start();
+            // updates: a quiet check 30 s after start, then every 6 h (actually asking GitHub at most once a day)
+            var updateUi = new Control();
+            updateUi.CreateControl();
+            var updates = new System.Windows.Forms.Timer { Interval = 30 * 1000 };
+            updates.Tick += (s, e) => { updates.Interval = 6 * 60 * 60 * 1000; Updater.BackgroundCheck(updateUi); };
+            updates.Start();
             string candidate = null, opened = null;
             DateTime since = DateTime.MinValue;
             int idleChecks = 0;
@@ -4892,6 +5195,23 @@ static class Program
             }
             return;
         }
+        if (arg == "--updatetest" && args.Length > 1)
+        {
+            // Self-test: reach GitHub, read the latest release, download (but don't install) its exe
+            var sb = new StringBuilder("this build: " + Updater.CurrentText + "\r\n");
+            try
+            {
+                var r = Updater.FetchLatest();
+                sb.AppendLine("latest on GitHub: " + r.Version.ToString(3) + "  " + r.ExeUrl);
+                sb.AppendLine("newer than this build: " + (r.Version > Updater.Current));
+                string exe = Updater.Download(r.ExeUrl, null);
+                sb.AppendLine("downloaded " + new FileInfo(exe).Length + " bytes, looks like a program: yes");
+                File.Delete(exe);
+            }
+            catch (Exception ex) { sb.AppendLine("FAILED: " + ex.Message); }
+            File.WriteAllText(args[1], sb.ToString());
+            return;
+        }
         if (arg == "--edgetest2" && args.Length > 1)
         {
             // Self-test: a real folder with its settings card over stripes; saves the card zoomed 4x
@@ -5011,7 +5331,24 @@ static class Program
             catch (Exception ex) { File.WriteAllText(args[2] + ".error.txt", ex.ToString()); }
             return;
         }
-        if (arg == "--install") { Installer.Install(quiet); return; }
+        if (arg == "--install")
+        {
+            Installer.Install(quiet);
+            if (Array.IndexOf(args, "--updated") >= 0)
+            {
+                // installed by the in-app updater: say so, and tidy up the downloaded copy afterwards
+                Settings.NotifiedVersion = Updater.CurrentText;
+                var done = new Toast.Done("Prysm Folder is up to date", "You're now on version " + Updater.CurrentText + ".");
+                Application.Run(done);
+                try
+                {
+                    Process.Start(new ProcessStartInfo("cmd.exe", "/c ping 127.0.0.1 -n 3 > nul & del \"" + Application.ExecutablePath + "\"")
+                    { CreateNoWindow = true, UseShellExecute = false });
+                }
+                catch { }
+            }
+            return;
+        }
         if (arg == "--uninstall") { Installer.Uninstall(quiet); return; }
         if (arg == "--machine-register")
         {

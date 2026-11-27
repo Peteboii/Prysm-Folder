@@ -34,7 +34,8 @@ you click something else.
 
 - **Make a folder right on the desktop.** Right-click the desktop → **New → Prysm Folder**, type a name. Done.
 - **Opens when you point at it.** No clicking needed: rest the pointer on the folder and it pops open with a
-  springy animation. Move away and it closes. (Double-clicking works too, and you can turn hovering off.)
+  springy animation. Move away and it closes. (Double-clicking works too, and you can turn hovering off.
+  Prefer no animation? Turn **Animations** off in settings and folders open and close instantly.)
 - **Put anything in it.** Apps, shortcuts, files, folders and websites. Drag them onto the folder's icon, or
   pause on the icon mid-drag and the folder **springs open** so you can drop them exactly where you want.
 - **Live icon.** The desktop icon is a mini-grid of what's inside, just like on a phone: 2 × 2, or 3 × 3 for
@@ -88,7 +89,7 @@ desktop as files (they'll open again if you reinstall).
 | **Rename** | Click the folder's name at the top, or rename it on the desktop like any file. |
 | **App options** | Right-click an app: open, run as administrator, open file location, rename, move, remove. |
 | **Close** | Click anywhere else, press Esc, or click the **✕**. |
-| **Settings** | The gear next to the ✕: hover-to-open on/off, See-through or Solid, whether the desktop icon shows 2 × 2 or 3 × 3, Rounded or Sharper corners, and **Updates**. |
+| **Settings** | The gear next to the ✕: hover-to-open on/off, animations on/off, See-through or Solid, whether the desktop icon shows 2 × 2 or 3 × 3, Rounded or Sharper corners, and **Updates**. |
 | **Update** | Gear → **Updates** → **Check**, then **Update** when a new version is there. A blue dot on the gear means one is waiting. |
 
 <div align="center">

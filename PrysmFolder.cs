@@ -275,6 +275,7 @@ static class Settings
     // Desktop icon: 3x3 mini-grid once a folder has more than 4 apps (true), or always 2x2 (false)
     public static bool IconGrid3 { get { return Get("IconGrid3", 1) != 0; } set { Set("IconGrid3", value ? 1 : 0); } }
     // Corners: big and round like Prism (false), or tighter (true). Both looks, and the Desktop icon.
+    public static bool Animations { get { return Get("Animations", 1) != 0; } set { Set("Animations", value ? 1 : 0); } }
     public static bool SharpCorners { get { return Get("SharpCorners", 0) != 0; } set { Set("SharpCorners", value ? 1 : 0); } }
 
     static string GetS(string name)
@@ -303,7 +304,7 @@ static class Settings
 static class Updater
 {
     public const string Repo = "Peteboii/Prysm-Folder";
-    public static readonly Version Current = new Version(1, 3, 0);
+    public static readonly Version Current = new Version(1, 3, 1);
     public static string CurrentText { get { return Current.ToString(3); } }
 
     public class Release { public Version Version; public string ExeUrl; }
@@ -464,7 +465,7 @@ class Toast : Form
         {
             double ms = clock.Elapsed.TotalMilliseconds;
             if (IsDisposed) { t.Dispose(); return; }
-            Opacity = ms < 200 ? ms / 200 : ms < 6000 ? 1 : Math.Max(0, 1 - (ms - 6000) / 400);
+            Opacity = !Settings.Animations ? (ms < 6000 ? 1 : 0) : ms < 200 ? ms / 200 : ms < 6000 ? 1 : Math.Max(0, 1 - (ms - 6000) / 400);
             if (ms > 6400) { t.Dispose(); Close(); }
         };
         t.Start();
@@ -583,6 +584,47 @@ static class Theme
     }
 }
 
+// Runs a short animation in step with the screen's refresh: each step waits for Windows'
+// compositor to show the next frame (DwmFlush), so a fade advances evenly on every refresh
+// instead of in the uneven ~15 ms jumps of a timer. Short (100-200 ms), so it simply runs.
+static class Anim
+{
+    [DllImport("dwmapi.dll")] static extern int DwmFlush();
+
+    public static void Run(double ms, Action<double> step)
+    {
+        var sw = Stopwatch.StartNew();
+        while (true)
+        {
+            double f = Math.Min(1, sw.Elapsed.TotalMilliseconds / ms);
+            step(f);
+            if (f >= 1) break;
+            if (DwmFlush() != 0) Thread.Sleep(4);
+        }
+    }
+
+    public static double EaseOut(double f) { return 1 - Math.Pow(1 - f, 3); }
+    public static double EaseIn(double f) { return f * f; }
+    public static double EaseOutQuint(double f) { return 1 - Math.Pow(1 - f, 5); }
+
+    [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr hwnd, IntPtr rect, IntPtr rgn, uint flags);
+
+    // Animations off: paint the whole window (children too) while it's still invisible, let the
+    // compositor take that finished frame (and the glass behind it), and only then make it visible,
+    // so the first thing on screen is the finished window, never a blank flash.
+    public static void ShowNow(Form f)
+    {
+        try
+        {
+            RedrawWindow(f.Handle, IntPtr.Zero, IntPtr.Zero, 0x1 | 0x100 | 0x80);   // INVALIDATE | UPDATENOW | ALLCHILDREN
+            DwmFlush();
+            DwmFlush();
+        }
+        catch { }
+        if (!f.IsDisposed) f.Opacity = 1;
+    }
+}
+
 // One shape on a control (a pill, a ring, a highlight, a line). Controls describe their shapes
 // as these; on glass they're drawn by Windows' vector renderer in the card layer behind (smooth
 // edges), elsewhere they're painted with GDI+ as usual. (Painted shapes on the see-through window
@@ -670,7 +712,7 @@ class CloseButton : Control
         }
         if (!Gear)
         {
-            float c = W / 2f, r = W * 0.16f;
+            float c = (W - 1) / 2f, r = W * 0.16f;   // the ring's own centre
             Color col = closeHot ? Color.White : Theme.Fg2;
             list.Add(Deco.Ln(ox + c - r, oy + c - r, ox + c + r, oy + c + r, col, 1.5f * s));
             list.Add(Deco.Ln(ox + c - r, oy + c + r, ox + c + r, oy + c - r, col, 1.5f * s));
@@ -691,10 +733,39 @@ class CloseButton : Control
             {
                 gearFont = Theme.IconFont(9.5f);
             }
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-            using (var b = new SolidBrush(hover ? Theme.Fg : Theme.Fg2))
-            using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                g.DrawString("", gearFont, b, new RectangleF(0, 1, Width, Height), sf);
+            FolderForm.TextCentered(g, "", gearFont, GearRect(), hover ? Theme.Fg : Theme.Fg2);
+        }
+    }
+
+    // The gear glyph's ink isn't centred in its font box: measure where it really lands once and
+    // shift it so its middle sits exactly on the ring's middle.
+    Size gearShiftFor; Point gearShift;
+    Rectangle GearRect()
+    {
+        if (gearShiftFor != Size) { gearShift = InkShift("", gearFont, Size); gearShiftFor = Size; }
+        return new Rectangle(gearShift.X, gearShift.Y, Width, Height);
+    }
+
+    static Point InkShift(string glyph, Font font, Size size)
+    {
+        using (var bmp = new Bitmap(size.Width, size.Height))
+        {
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.White);
+                FolderForm.TextCentered(g, glyph, font, new Rectangle(Point.Empty, size), Color.Black);
+            }
+            int x0 = size.Width, y0 = size.Height, x1 = -1, y1 = -1;
+            for (int y = 0; y < size.Height; y++)
+                for (int x = 0; x < size.Width; x++)
+                {
+                    var p = bmp.GetPixel(x, y);
+                    if (p.R + p.G + p.B < 600) { x0 = Math.Min(x0, x); x1 = Math.Max(x1, x); y0 = Math.Min(y0, y); y1 = Math.Max(y1, y); }
+                }
+            if (x1 < 0) return Point.Empty;
+            // the ring is centred on (size-1)/2 (edge coordinates); so is the ink after the shift
+            double inkX = (x0 + x1 + 1) / 2.0, inkY = (y0 + y1 + 1) / 2.0;
+            return new Point((int)Math.Round((size.Width - 1) / 2.0 - inkX), (int)Math.Round((size.Height - 1) / 2.0 - inkY));
         }
     }
 }
@@ -1967,6 +2038,7 @@ class FolderForm : Form, IGlassHost, IDecoHost
         if (e.Cancel || closeAnimDone || !Visible) return;
         if (e.CloseReason == CloseReason.WindowsShutDown || e.CloseReason == CloseReason.ApplicationExitCall ||
             e.CloseReason == CloseReason.TaskManagerClosing) return;
+        if (!Settings.Animations) { if (BackdropAlive) backdrop.HideNow(); Opacity = 0; return; }   // animations off: gone at once, glass and all
         e.Cancel = true;
         if (closing) return;   // already on its way out
         closing = true;
@@ -1993,6 +2065,7 @@ class FolderForm : Form, IGlassHost, IDecoHost
 
     void AnimateIn()
     {
+        if (!Settings.Animations) { Anim.ShowNow(this); return; }   // animations off: there at once
         if (BackdropAlive) backdrop.AnimateIn();
         animTarget = Location;
         bool rise = !BackdropAlive;
@@ -2105,45 +2178,34 @@ class FolderForm : Form, IGlassHost, IDecoHost
     // The patch matches the shape behind it, so it can't be seen.
     public static void TextOnColor(Graphics g, string text, Font font, Rectangle r, Color textColor, Color bg)
     {
-        var old = g.TextRenderingHint;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
-        using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-        {
-            var size = g.MeasureString(text, font, r.Width, sf);
-            float pad = 3 * S, h = Math.Min(r.Height - 4 * S, size.Height + 2 * pad), w = Math.Min(r.Width - r.Height, size.Width + 2 * pad);
-            // whole pixels, no smoothing: a soft patch edge would blend into the invisible background too
-            var patch = Rectangle.Round(new RectangleF(r.X + (r.Width - w) / 2f, r.Y + (r.Height - h) / 2f, w, h));
-            var oldMode = g.SmoothingMode;
-            g.SmoothingMode = SmoothingMode.None;
-            g.PixelOffsetMode = PixelOffsetMode.None;
-            using (var b = new SolidBrush(bg)) g.FillRectangle(b, patch);
-            g.SmoothingMode = oldMode;
-            using (var b = new SolidBrush(textColor)) g.DrawString(text, font, b, r, sf);
-        }
-        g.TextRenderingHint = old;
+        var size = TextRenderer.MeasureText(g, text, font, r.Size, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+        float pad = 3 * S, h = Math.Min(r.Height - 4 * S, size.Height + 2 * pad), w = Math.Min(r.Width - r.Height, size.Width + 2 * pad);
+        // whole pixels, no smoothing: a soft patch edge would blend into the invisible background too
+        var patch = Rectangle.Round(new RectangleF(r.X + (r.Width - w) / 2f, r.Y + (r.Height - h) / 2f, w, h));
+        var oldMode = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.None;
+        g.PixelOffsetMode = PixelOffsetMode.None;
+        using (var b = new SolidBrush(bg)) g.FillRectangle(b, patch);
+        g.SmoothingMode = oldMode;
+        // ClearType, blending into the patch's exact colour: as sharp as Windows' own text
+        TextRenderer.DrawText(g, text, font, r, textColor, bg, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+            TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
     }
 
-    // Text that also looks right on glass: grayscale anti-aliasing (ClearType's coloured edges show
-    // up as halos against the see-through background).
+    // Text, drawn with ClearType (Windows' own sharp text), on both looks. On glass its edges blend
+    // into the see-through colour, which is close to the glass behind, so it stays crisp there too.
     public static void DrawLabel(Graphics g, string text, Font font, Rectangle r, Color color, bool center)
     {
-        if (!Theme.Glass)
-        {
-            TextRenderer.DrawText(g, text, font, r, color, (center ? TextFormatFlags.HorizontalCenter : TextFormatFlags.Left) |
-                TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | (center ? 0 : TextFormatFlags.VerticalCenter));
-            return;
-        }
-        var old = g.TextRenderingHint;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-        using (var b = new SolidBrush(color))
-        using (var sf = new StringFormat { Alignment = center ? StringAlignment.Center : StringAlignment.Near,
-                                           LineAlignment = center ? StringAlignment.Near : StringAlignment.Center,
-                                           Trimming = StringTrimming.EllipsisCharacter, HotkeyPrefix = System.Drawing.Text.HotkeyPrefix.None })
-        {
-            if (!center) sf.FormatFlags |= StringFormatFlags.NoWrap;
-            g.DrawString(text, font, b, r, sf);
-        }
-        g.TextRenderingHint = old;
+        TextRenderer.DrawText(g, text, font, r, color, (center ? TextFormatFlags.HorizontalCenter : TextFormatFlags.Left | TextFormatFlags.SingleLine) |
+            TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding |
+            (center ? 0 : TextFormatFlags.VerticalCenter));
+    }
+
+    // centred ClearType text (pills, buttons)
+    public static void TextCentered(Graphics g, string text, Font font, Rectangle r, Color color)
+    {
+        TextRenderer.DrawText(g, text, font, r, color, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+            TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
     }
 
     public static GraphicsPath Rounded(RectangleF r, float rad)
@@ -2219,6 +2281,8 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
     readonly FolderForm folder;
     readonly Action<bool> setLook;
     GlassBackdrop glass;
+    Rectangle animRow, animToggle;
+    const int RowsShift = 50;   // everything below the Animations row moves down by this much
     Rectangle hoverRow, toggleRect, segGlass, segSolid, seg2, seg3, segRound, segSharp, updBtn;
     int hot = -1;   // 0 hover row, 1 See-through, 2 Solid, 3 icon 2x2, 4 icon 3x3, 5 Rounded, 6 Sharper, 7 update button
 
@@ -2244,21 +2308,24 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
         BackColor = Theme.Bg;
         TransparencyKey = Theme.Key;
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
-        ClientSize = new Size(Px(292), Px(410));
+        ClientSize = new Size(Px(292), Px(410 + RowsShift));
         int pad = Px(14);
         hoverRow = new Rectangle(pad - Px(6), Px(46), ClientSize.Width - 2 * pad + Px(12), Px(48));
         toggleRect = new Rectangle(ClientSize.Width - pad - Px(40), hoverRow.Y + (hoverRow.Height - Px(20)) / 2, Px(40), Px(20));
-        int segY = Px(130), segH = Px(36), half = (ClientSize.Width - 2 * pad) / 2;
+        animRow = new Rectangle(hoverRow.X, hoverRow.Bottom + Px(2), hoverRow.Width, hoverRow.Height);
+        animToggle = new Rectangle(toggleRect.X, animRow.Y + (animRow.Height - Px(20)) / 2, Px(40), Px(20));
+        int D = RowsShift;
+        int segY = Px(130 + D), segH = Px(36), half = (ClientSize.Width - 2 * pad) / 2;
         segGlass = new Rectangle(pad, segY, half, segH);
         segSolid = new Rectangle(pad + half, segY, ClientSize.Width - 2 * pad - half, segH);
-        int gridY = Px(210);
+        int gridY = Px(210 + D);
         seg2 = new Rectangle(pad, gridY, half, segH);
         seg3 = new Rectangle(pad + half, gridY, ClientSize.Width - 2 * pad - half, segH);
-        int cornerY = Px(290);
+        int cornerY = Px(290 + D);
         segRound = new Rectangle(pad, cornerY, half, segH);
         segSharp = new Rectangle(pad + half, cornerY, ClientSize.Width - 2 * pad - half, segH);
         int bw = Px(104);
-        updBtn = new Rectangle(ClientSize.Width - pad - bw, Px(358), bw, Px(32));
+        updBtn = new Rectangle(ClientSize.Width - pad - bw, Px(358 + D), bw, Px(32));
         Cursor = Cursors.Hand;
     }
 
@@ -2295,6 +2362,7 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
+        if (!Settings.Animations) { Anim.ShowNow(this); return; }
         if (glass != null && !glass.IsDisposed) glass.AnimateIn();
         var clock = Stopwatch.StartNew();
         var t = new System.Windows.Forms.Timer { Interval = 8 };
@@ -2317,6 +2385,7 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
     {
         base.OnFormClosing(e);
         if (e.Cancel || closeAnimDone || !Visible || e.CloseReason == CloseReason.WindowsShutDown || e.CloseReason == CloseReason.ApplicationExitCall) return;
+        if (!Settings.Animations) { if (glass != null && !glass.IsDisposed) glass.HideNow(); Opacity = 0; return; }
         e.Cancel = true;
         if (closing) return;
         closing = true;
@@ -2343,7 +2412,7 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
     {
         return hoverRow.Contains(p) ? 0 : segGlass.Contains(p) ? 1 : segSolid.Contains(p) ? 2
              : seg2.Contains(p) ? 3 : seg3.Contains(p) ? 4
-             : segRound.Contains(p) ? 5 : segSharp.Contains(p) ? 6 : updBtn.Contains(p) ? 7 : -1;
+             : segRound.Contains(p) ? 5 : segSharp.Contains(p) ? 6 : updBtn.Contains(p) ? 7 : animRow.Contains(p) ? 8 : -1;
     }
 
     protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); SetHot(HitTest(e.Location)); }
@@ -2377,6 +2446,10 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
             case 5: if (Theme.Sharp) { Close(); folder.SetCorners(false); } break;
             case 6: if (!Theme.Sharp) { Close(); folder.SetCorners(true); } break;
             case 7: UpdateButton(); break;
+            case 8:
+                Settings.Animations = !Settings.Animations;
+                Invalidate();
+                break;
         }
     }
 
@@ -2404,23 +2477,28 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
         FolderForm.DrawLabel(g, "Open by hovering", font, new Rectangle(pad, hoverRow.Y + Px(5), toggleRect.Left - pad - Px(8), Px(20)), Theme.Fg, false);
         FolderForm.DrawLabel(g, "Point at a folder to open it", small, new Rectangle(pad, hoverRow.Y + Px(24), toggleRect.Left - pad - Px(8), Px(18)), Theme.Dim, false);
 
+        // Row: Animations  [toggle]
+        FolderForm.DrawLabel(g, "Animations", font, new Rectangle(pad, animRow.Y + Px(5), animToggle.Left - pad - Px(8), Px(20)), Theme.Fg, false);
+        FolderForm.DrawLabel(g, "Off: folders open and close instantly", small, new Rectangle(pad, animRow.Y + Px(24), animToggle.Left - pad - Px(8), Px(18)), Theme.Dim, false);
+
+        int D = RowsShift;
         // Look:  [ See-through | Solid ]
-        FolderForm.DrawLabel(g, "Look", small, new Rectangle(pad, Px(104), Width - 2 * pad, Px(20)), Theme.Dim, false);
+        FolderForm.DrawLabel(g, "Look", small, new Rectangle(pad, Px(104 + D), Width - 2 * pad, Px(20)), Theme.Dim, false);
         SegmentText(g, segGlass, "See-through", Theme.Glass);
         SegmentText(g, segSolid, "Solid", !Theme.Glass);
 
         // Desktop icon:  [ 2 × 2 | 3 × 3 ]   (3 × 3 kicks in once a folder has more than 4 apps)
-        FolderForm.DrawLabel(g, "Desktop icon, with more than 4 apps", small, new Rectangle(pad, Px(184), Width - 2 * pad, Px(20)), Theme.Dim, false);
+        FolderForm.DrawLabel(g, "Desktop icon, with more than 4 apps", small, new Rectangle(pad, Px(184 + D), Width - 2 * pad, Px(20)), Theme.Dim, false);
         SegmentText(g, seg2, "2 × 2", !Theme.Grid3);
         SegmentText(g, seg3, "3 × 3", Theme.Grid3);
 
         // Corners:  [ Rounded | Sharper ]
-        FolderForm.DrawLabel(g, "Corners", small, new Rectangle(pad, Px(264), Width - 2 * pad, Px(20)), Theme.Dim, false);
+        FolderForm.DrawLabel(g, "Corners", small, new Rectangle(pad, Px(264 + D), Width - 2 * pad, Px(20)), Theme.Dim, false);
         SegmentText(g, segRound, "Rounded", !Theme.Sharp);
         SegmentText(g, segSharp, "Sharper", Theme.Sharp);
 
         // Updates:  Version 1.3.0 / status        [ Check | Update ]
-        FolderForm.DrawLabel(g, "Updates", small, new Rectangle(pad, Px(336), Width - 2 * pad, Px(20)), Theme.Dim, false);
+        FolderForm.DrawLabel(g, "Updates", small, new Rectangle(pad, Px(336 + D), Width - 2 * pad, Px(20)), Theme.Dim, false);
         FolderForm.DrawLabel(g, "Version " + Updater.CurrentText, font, new Rectangle(pad, updBtn.Y - Px(2), updBtn.Left - pad - Px(8), Px(20)), Theme.Fg, false);
         FolderForm.DrawLabel(g, UpdateStatus(), small, new Rectangle(pad, updBtn.Y + Px(17), updBtn.Left - pad - Px(4), Px(18)),
                              upd == Upd.Available ? Theme.Accent : upd == Upd.Failed ? Color.FromArgb(0xff, 0x8a, 0x8a) : Theme.Dim, false);
@@ -2506,13 +2584,9 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
     {
         float s = FolderForm.S;
         if (hot == 0) list.Add(Soft(hoverRow, Px(10), Theme.Ink07));
-        // Windows 11 toggle switch, in Prism's accent
-        bool on = Settings.HoverOpen && Installer.IsInstalled;
-        var t = toggleRect;
-        list.Add(on ? Deco.Box(t, t.Height / 2f, Theme.Accent) : Deco.Outline(t, t.Height / 2f, Theme.Dim, 1.2f * s));
-        float k = on ? t.Height - 8 * s : t.Height - 10 * s;
-        float cx = on ? t.Right - t.Height / 2f : t.X + t.Height / 2f, cy = t.Y + t.Height / 2f;
-        list.Add(Deco.Circle(new RectangleF(cx - k / 2, cy - k / 2, k, k), on ? Color.Black : Theme.Dim, Color.Empty, 0));
+        if (hot == 8) list.Add(Soft(animRow, Px(10), Theme.Ink07));
+        Toggle(list, toggleRect, Settings.HoverOpen && Installer.IsInstalled);
+        Toggle(list, animToggle, Settings.Animations);
         // the three two-way switches
         Segments(list, segGlass, segSolid, Theme.Glass, 1);
         Segments(list, seg2, seg3, !Theme.Grid3, 3);
@@ -2522,6 +2596,16 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
         if (upd == Upd.Available) list.Add(Deco.Box(u, u.Height / 2f, hot == 7 ? ControlPaint.Light(Theme.Accent, .25f) : Theme.Accent));
         else list.Add(Theme.Glass ? Deco.Outline(u, u.Height / 2f, hot == 7 ? Theme.Dim : Theme.Ink18, 1.2f * s)
                                   : Deco.Box(u, u.Height / 2f, hot == 7 ? Theme.Ink12 : Theme.Ink08));
+    }
+
+    // Windows 11 toggle switch, in Prism's accent
+    static void Toggle(List<Deco> list, Rectangle t, bool on)
+    {
+        float s = FolderForm.S;
+        list.Add(on ? Deco.Box(t, t.Height / 2f, Theme.Accent) : Deco.Outline(t, t.Height / 2f, Theme.Dim, 1.2f * s));
+        float k = on ? t.Height - 8 * s : t.Height - 10 * s;
+        float cx = on ? t.Right - t.Height / 2f : t.X + t.Height / 2f, cy = t.Y + t.Height / 2f;
+        list.Add(Deco.Circle(new RectangleF(cx - k / 2, cy - k / 2, k, k), on ? Color.Black : Theme.Dim, Color.Empty, 0));
     }
 
     // the track, the selected pill (Prism blue) and the hovered one
@@ -2551,15 +2635,7 @@ class SettingsCard : Form, IGlassHost, IFolderChild, IDecoHost
         else TextAt(g, text, font, inner, Theme.Fg2);
     }
 
-    static void TextAt(Graphics g, string text, Font f, Rectangle r, Color c)
-    {
-        var old = g.TextRenderingHint;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-        using (var b = new SolidBrush(c))
-        using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-            g.DrawString(text, f, b, r, sf);
-        g.TextRenderingHint = old;
-    }
+    static void TextAt(Graphics g, string text, Font f, Rectangle r, Color c) { FolderForm.TextCentered(g, text, f, r, c); }
 
 }
 
@@ -2630,6 +2706,7 @@ abstract class PrismPopup : Form, IGlassHost, IFolderChild, IDecoHost
     {
         base.OnShown(e);
         Activate();
+        if (!Settings.Animations) { Anim.ShowNow(this); return; }
         if (glass != null && !glass.IsDisposed) glass.AnimateIn();
         Fade(0, 1, 120, null);
     }
@@ -2655,6 +2732,7 @@ abstract class PrismPopup : Form, IGlassHost, IFolderChild, IDecoHost
     {
         base.OnFormClosing(e);
         if (e.Cancel || closeAnimDone || !Visible || e.CloseReason == CloseReason.WindowsShutDown || e.CloseReason == CloseReason.ApplicationExitCall) return;
+        if (!Settings.Animations) { if (glass != null && !glass.IsDisposed) glass.HideNow(); Opacity = 0; return; }
         e.Cancel = true;
         if (closing) return;
         closing = true;
@@ -2784,12 +2862,7 @@ class PrismMenu : PrismPopup
             if (en.Separator) continue;
             Color c = en.Danger ? Color.FromArgb(0xff, 0x6b, 0x6b) : (i == hot ? Theme.Fg : Theme.Fg2);
             var gr = new Rectangle(en.Bounds.X + Px(8), en.Bounds.Y, Px(24), en.Bounds.Height);
-            var old = g.TextRenderingHint;
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-            using (var b = new SolidBrush(en.Danger ? c : (i == hot ? Theme.Accent : Theme.Dim)))
-            using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                g.DrawString(en.Glyph.ToString(), iconFont, b, gr, sf);
-            g.TextRenderingHint = old;
+            FolderForm.TextCentered(g, en.Glyph.ToString(), iconFont, gr, en.Danger ? c : (i == hot ? Theme.Accent : Theme.Dim));
             var tr = new Rectangle(gr.Right + Px(8), en.Bounds.Y, en.Bounds.Right - gr.Right - Px(12), en.Bounds.Height);
             FolderForm.DrawLabel(g, en.Text, Font, tr, c, false);
         }
@@ -2893,12 +2966,7 @@ class PromptCard : PrismPopup
             FolderForm.TextOnColor(g, text, Font, r, Color.Black, hover ? ControlPaint.Light(Theme.Accent, .25f) : Theme.Accent);
             return;
         }
-        var old = g.TextRenderingHint;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-        using (var b = new SolidBrush(primary ? Color.Black : Theme.Fg))
-        using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-            g.DrawString(text, Font, b, r, sf);
-        g.TextRenderingHint = old;
+        FolderForm.TextCentered(g, text, Font, r, Theme.Fg);
     }
 }
 
@@ -3149,6 +3217,7 @@ class GlassBackdrop : Form
     public void AnimateIn()
     {
         if (root == null) return;
+        if (!Settings.Animations) { root.Scale = new System.Numerics.Vector3(1f, 1f, 1f); root.Opacity = 1f; return; }
         try
         {
             var c = compositor;
@@ -3169,6 +3238,12 @@ class GlassBackdrop : Form
     }
 
     // Closing: the glass shrinks back a little and fades away (the reverse of AnimateIn, quicker).
+    // animations off: vanish in the same frame as the window on top
+    public void HideNow()
+    {
+        try { if (root != null) root.Opacity = 0f; } catch { }
+    }
+
     public void AnimateOut(int ms)
     {
         if (root == null) return;

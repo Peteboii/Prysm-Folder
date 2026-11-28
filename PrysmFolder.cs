@@ -274,8 +274,9 @@ static class Settings
     public static bool Glass { get { return Get("Glass", 1) != 0; } set { Set("Glass", value ? 1 : 0); } }
     // Desktop icon: 3x3 mini-grid once a folder has more than 4 apps (true), or always 2x2 (false)
     public static bool IconGrid3 { get { return Get("IconGrid3", 1) != 0; } set { Set("IconGrid3", value ? 1 : 0); } }
-    // Corners: big and round like Prism (false), or tighter (true). Both looks, and the Desktop icon.
+    // Animations: folders, menus and cards fade/spring in and out (true), or appear instantly (false)
     public static bool Animations { get { return Get("Animations", 1) != 0; } set { Set("Animations", value ? 1 : 0); } }
+    // Corners: big and round like Prism (false), or tighter (true). Both looks, and the Desktop icon.
     public static bool SharpCorners { get { return Get("SharpCorners", 0) != 0; } set { Set("SharpCorners", value ? 1 : 0); } }
 
     static string GetS(string name)
@@ -304,7 +305,7 @@ static class Settings
 static class Updater
 {
     public const string Repo = "Peteboii/Prysm-Folder";
-    public static readonly Version Current = new Version(1, 3, 1);
+    public static readonly Version Current = new Version(1, 3, 2);
     public static string CurrentText { get { return Current.ToString(3); } }
 
     public class Release { public Version Version; public string ExeUrl; }
@@ -356,6 +357,7 @@ static class Updater
         var req = (HttpWebRequest)WebRequest.Create(url);
         req.UserAgent = "PrysmFolder/" + CurrentText;
         req.Timeout = 30000;
+        req.ReadWriteTimeout = 30000;   // a stalled connection fails instead of hanging at "Downloading… 40%"
         using (var resp = (HttpWebResponse)req.GetResponse())
         using (var src = resp.GetResponseStream())
         using (var dst = File.Create(path))
@@ -370,6 +372,8 @@ static class Updater
                 int pct = total > 0 ? (int)(got * 100 / total) : 0;
                 if (pct != last && progress != null) { progress(pct); last = pct; }
             }
+            // a dropped connection can end the stream early: never install half a program
+            if (total > 0 && got != total) throw new Exception("The download was cut off. Try again.");
         }
         var head = new byte[2];
         using (var f = File.OpenRead(path)) f.Read(head, 0, 2);
@@ -552,7 +556,19 @@ static class Theme
         return Color.FromArgb((int)(p.R + (c.R - p.R) * a), (int)(p.G + (c.G - p.G) * a), (int)(p.B + (c.B - p.B) * a));
     }
 
+    // Fonts are made once and shared (nothing disposes them): every folder the hover helper opens
+    // used to create new ones, trying several names each time, and leave them for the garbage collector.
+    static readonly Dictionary<string, Font> fonts = new Dictionary<string, Font>();
+
     public static Font UiFont(float size, FontStyle style = FontStyle.Regular, bool display = false)
+    {
+        string key = size + "|" + style + "|" + display + "|" + FontScale;
+        Font cached;
+        if (fonts.TryGetValue(key, out cached)) return cached;
+        return fonts[key] = MakeUiFont(size, style, display);
+    }
+
+    static Font MakeUiFont(float size, FontStyle style, bool display)
     {
         foreach (string name in display
             ? new[] { "Segoe UI Variable Display Semib", "Segoe UI Variable Display", "Segoe UI Semibold", "Segoe UI" }
@@ -577,10 +593,12 @@ static class Theme
     // Windows 11's icon font (Segoe Fluent Icons), or Segoe MDL2 Assets on older systems
     public static Font IconFont(float size)
     {
+        string key = "icon|" + size + "|" + FontScale;
+        Font cached;
+        if (fonts.TryGetValue(key, out cached)) return cached;
         var f = new Font("Segoe Fluent Icons", size * FontScale);
-        if (f.Name == "Segoe Fluent Icons") return f;
-        f.Dispose();
-        return new Font("Segoe MDL2 Assets", size * FontScale);
+        if (f.Name != "Segoe Fluent Icons") { f.Dispose(); f = new Font("Segoe MDL2 Assets", size * FontScale); }
+        return fonts[key] = f;
     }
 }
 
@@ -1004,7 +1022,7 @@ class FolderForm : Form, IGlassHost, IDecoHost
     {
         base.OnSizeChanged(e);
         if (BackdropAlive) backdrop.Bounds = Bounds;
-        if (Region != null) Region = System.Drawing.Region.FromHrgn(Native.CreateRoundRectRgn(0, 0, Width + 1, Height + 1, Px(20), Px(20)));
+        if (Region != null) Region = RoundRegion();
     }
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
@@ -1013,6 +1031,7 @@ class FolderForm : Form, IGlassHost, IDecoHost
     }
     protected override void Dispose(bool disposing)
     {
+        Icon ownIcon = disposing && ownsIcon ? Icon : null;
         if (disposing)
         {
             CloseBackdrop();
@@ -1021,6 +1040,7 @@ class FolderForm : Form, IGlassHost, IDecoHost
             slideTimer.Dispose();
         }
         base.Dispose(disposing);
+        if (ownIcon != null) { ownsIcon = false; ownIcon.Dispose(); }   // once the window is gone
     }
     void CloseBackdrop()
     {
@@ -1146,6 +1166,8 @@ class FolderForm : Form, IGlassHost, IDecoHost
 
     // If an item's file or folder has moved, follow it (true if its path changed). Also notes the
     // ID of items that don't have one yet, so they can be followed later.
+    static readonly Dictionary<string, DateTime> notFoundAt = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
     static bool Track(Item it)
     {
         if (Native.IsUrl(it.Path)) return false;
@@ -1155,8 +1177,14 @@ class FolderForm : Form, IGlassHost, IDecoHost
             it.Id = FileTracker.IdOf(it.Path);
             return it.Id != null;
         }
+        // Searching for a missing item walks every drive and several user folders: slow. When it
+        // turns up nothing, don't search again for a while, or every open of a folder holding a
+        // deleted item (and the helper's start-up warm-up) pays for it again.
+        DateTime last;
+        if (notFoundAt.TryGetValue(it.Path, out last) && (DateTime.Now - last).TotalMinutes < 2) return false;
         string now = FileTracker.Find(it.Id) ?? FileTracker.FindByName(it.Path);
-        if (now == null) return false;
+        if (now == null) { notFoundAt[it.Path] = DateTime.Now; return false; }
+        notFoundAt.Remove(it.Path);
         HoverWatcher.Log("followed a moved item: " + it.Path + " -> " + now);
         it.Path = now;
         it.Id = FileTracker.IdOf(now);
@@ -1301,7 +1329,7 @@ class FolderForm : Form, IGlassHost, IDecoHost
         ClientSize = new Size(grid.Right + pad, grid.Bottom + pad);
         Invalidate();
         RequestDecos();
-        Icon = MakeFormIcon();
+        SetFormIcon();
     }
 
     void WireTile(Tile t)
@@ -1426,7 +1454,7 @@ class FolderForm : Form, IGlassHost, IDecoHost
             StartSlide();
         }
         Save();
-        Icon = MakeFormIcon();
+        SetFormIcon();
         return true;
     }
 
@@ -1494,7 +1522,7 @@ class FolderForm : Form, IGlassHost, IDecoHost
         if (!Native.IsUrl(it.Path))
         {
             m.Add("Run as administrator", '', () => Launch(it, true));
-            m.Add("Open file location", '', () => Process.Start("explorer.exe", "/select,\"" + it.Path + "\""));
+            m.Add("Open file location", '', () => OpenLocation(it));
         }
         m.AddSeparator();
         m.Add("Rename", '', () =>
@@ -1699,6 +1727,19 @@ class FolderForm : Form, IGlassHost, IDecoHost
 
     // ---------- launching ----------
     [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(int processId);
+
+    // "Open file location": File Explorer with the item selected (in front, like opening an app)
+    void OpenLocation(Item it)
+    {
+        try
+        {
+            if (!File.Exists(it.Path) && !Directory.Exists(it.Path) && Track(it)) { it.Icon = Native.GetIcon(it.Path); Save(); }
+            AllowSetForegroundWindow(-1 /*ASFW_ANY*/);
+            Process.Start(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe"), "/select,\"" + it.Path + "\"");
+            Close();
+        }
+        catch (Exception ex) { ShowNote("Couldn't open its location: " + ex.Message); }
+    }
 
     void Launch(Item it, bool admin = false)
     {
@@ -1959,11 +2000,32 @@ class FolderForm : Form, IGlassHost, IDecoHost
         }
     }
 
-    Icon MakeFormIcon()
+    // The window's own icon. Icon.FromHandle doesn't own the handle, so copy it into an icon that
+    // does and free the original: otherwise every folder opened leaked an icon handle, and the hover
+    // helper (which runs all day) could eventually run out and stop drawing.
+    void SetFormIcon()
     {
+        Icon made;
         using (var big = RenderPreview(items, 64))
         using (var small = new Bitmap(big, 32, 32))
-            return System.Drawing.Icon.FromHandle(small.GetHicon());
+        {
+            IntPtr h = small.GetHicon();
+            try { using (var tmp = System.Drawing.Icon.FromHandle(h)) made = (Icon)tmp.Clone(); }
+            finally { Native.DestroyIcon(h); }
+        }
+        var old = Icon;
+        Icon = made;
+        if (old != null && old != made && ownsIcon) old.Dispose();
+        ownsIcon = true;
+    }
+    bool ownsIcon;
+
+    // a rounded window region (only used where Windows can't round the corners itself)
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr h);
+    Region RoundRegion()
+    {
+        IntPtr h = Native.CreateRoundRectRgn(0, 0, Width + 1, Height + 1, Px(20), Px(20));
+        try { return System.Drawing.Region.FromHrgn(h); } finally { DeleteObject(h); }
     }
 
     // ---------- window behaviour ----------
@@ -1982,7 +2044,7 @@ class FolderForm : Form, IGlassHost, IDecoHost
         int round = 2; // DWMWCP_ROUND (Windows 11)
         bool ok = false;
         try { ok = Native.DwmSetWindowAttribute(Handle, 33, ref round, 4) == 0; } catch { }
-        if (!ok) Region = System.Drawing.Region.FromHrgn(Native.CreateRoundRectRgn(0, 0, Width + 1, Height + 1, Px(20), Px(20)));
+        if (!ok) Region = RoundRegion();
         try
         {
             int dark = Theme.Light ? 0 : 1, off = 1, rim = Theme.ToBgr(Theme.Rim);
@@ -3346,7 +3408,9 @@ class GlassBackdrop : Form
                 return true;
             }
             // 1. the blurred backdrop, cut out by a smooth rounded mask
-            if (!AddMaskedBackdrop(c)) AddFill(c.CreateHostBackdropBrush());
+            // (Windows' mask brush won't take the blur as its source, so a smooth mask isn't possible;
+            // trying it failed with an error on every open. The clip below is tucked under the rim.)
+            AddFill(c.CreateHostBackdropBrush());
             AddShapes(c);
             // 2. Prism's panel tint (Liquid Glass: the panel thinned right down over the blur)
             Color panel = Theme.Light ? Color.FromArgb(0xf3, 0xf3, 0xf5) : Color.FromArgb(0x14, 0x14, 0x16);
@@ -3395,7 +3459,7 @@ class GlassBackdrop : Form
         sized.Add(sprite);
     }
 
-    public bool Masked { get { return maskSurface != null; } }   // the blur has the smooth mask (self-test)
+    public bool Masked { get { return maskSurface != null; } }   // the blur has the smooth mask (self-test; not used now)
 
     // One shape layer holds the tint, sheen and rim (or the solid panel and rim).
     Windows.UI.Composition.ShapeVisual shapes;
@@ -3630,19 +3694,36 @@ static class HoverWatcher
         if (open.ContainsKey(file)) return;
         string id = "file:" + Path.GetFullPath(file).ToLowerInvariant().Replace('\\', '/');
         bool created;
-        var mutex = new Mutex(true, "AppFolder_" + id, out created);   // same lock as a double-clicked folder
+        Mutex mutex;
+        try { mutex = new Mutex(true, "AppFolder_" + id, out created); }   // same lock as a double-clicked folder
+        catch (AbandonedMutexException) { return; }
         if (!created) { mutex.Dispose(); return; }                     // already open in another window
-        Theme.Load();                                                  // pick up a changed look
-        FolderForm.StartRenaming = false;
-        var f = new FolderForm(id, file) { HoverMode = true, SpringMode = spring };
-        open[file] = f;
-        f.FormClosed += (s, e) =>
+        bool released = false;
+        Action release = () =>
         {
+            if (released) return;
+            released = true;
             open.Remove(file);
             try { mutex.ReleaseMutex(); } catch { }
             mutex.Dispose();
         };
-        f.Show();
+        FolderForm f = null;
+        try
+        {
+            Theme.Load();                                              // pick up a changed look
+            FolderForm.StartRenaming = false;
+            f = new FolderForm(id, file) { HoverMode = true, SpringMode = spring };
+            open[file] = f;
+            f.FormClosed += (s, e) => release();
+            f.Show();
+        }
+        catch (Exception ex)
+        {
+            // never leave the lock (or the "open" entry) behind: that folder would refuse to open until a restart
+            Log("couldn't open " + file + ": " + ex.Message);
+            release();
+            if (f != null) try { f.Dispose(); } catch { }
+        }
     }
 
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point p);
@@ -3663,9 +3744,22 @@ static class HoverWatcher
         return top == "Progman" || top == "WorkerW" ? h : IntPtr.Zero;
     }
 
+    // The pointer check runs 40 times a second; resting on one icon shouldn't mean checking the
+    // disk 40 times a second, so the answer for the last name is kept for a moment.
+    static string lastName, lastFile;
+    static DateTime lastLookup;
+
     static string FolderFileFor(string name)
     {
         if (string.IsNullOrEmpty(name)) return null;
+        if (name == lastName && (DateTime.Now - lastLookup).TotalMilliseconds < 1000) return lastFile;
+        lastFile = LookUpFolderFile(name);
+        lastName = name; lastLookup = DateTime.Now;
+        return lastFile;
+    }
+
+    static string LookUpFolderFile(string name)
+    {
         foreach (var dir in new[] { Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
                                     Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory) })
         {
@@ -5194,6 +5288,8 @@ static class Promo
 
 static class Program
 {
+    [DllImport("user32.dll")] static extern uint GetGuiResources(IntPtr process, uint flags);
+
     [STAThread]
     static void Main(string[] args)
     {
@@ -5231,6 +5327,42 @@ static class Program
                     while (!closed && cw.ElapsedMilliseconds < 2000) { Application.DoEvents(); Thread.Sleep(1); }
                     sb.AppendLine("      closed after " + cw.Elapsed.TotalMilliseconds.ToString("0") + " ms (animated: " + closed + ")");
                 }
+            }
+            catch (Exception ex) { sb.AppendLine("ERROR " + ex); }
+            File.WriteAllText(args[2], sb.ToString());
+            return;
+        }
+        if (arg == "--leaktest" && args.Length > 2)
+        {
+            // Self-test: opens and closes a folder many times, like the hover helper does all day,
+            // and reports whether Windows handles (GDI / USER objects) keep piling up.
+            var sb = new StringBuilder();
+            try
+            {
+                Func<string> counts = () =>
+                {
+                    GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+                    var h = Process.GetCurrentProcess().Handle;
+                    return "GDI " + GetGuiResources(h, 0) + ", USER " + GetGuiResources(h, 1);
+                };
+                Action openClose = () =>
+                {
+                    var f = new FolderForm("leaktest", Path.GetFullPath(args[1])) { OpenAt = new Point(-30000, -30000) };
+                    bool closed = false;
+                    f.FormClosed += (s, e) => closed = true;
+                    f.Show();
+                    var sw = Stopwatch.StartNew();
+                    while (sw.ElapsedMilliseconds < 400) { Application.DoEvents(); Thread.Sleep(2); }
+                    f.Close();
+                    sw.Restart();
+                    while (!closed && sw.ElapsedMilliseconds < 1000) { Application.DoEvents(); Thread.Sleep(2); }
+                    f.Dispose();
+                    Application.DoEvents();
+                };
+                for (int i = 0; i < 3; i++) openClose();   // warm up caches first
+                sb.AppendLine("after 3 opens:  " + counts());
+                for (int i = 0; i < 40; i++) openClose();
+                sb.AppendLine("after 43 opens: " + counts());
             }
             catch (Exception ex) { sb.AppendLine("ERROR " + ex); }
             File.WriteAllText(args[2], sb.ToString());
